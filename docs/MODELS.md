@@ -11,7 +11,7 @@ if your files are identical.
 
 ## 关于模型命名 / On the model names
 
-- **`Qwen3.8-27B`** 是本机为该权重文件使用的名字，`UD-Q4_K_S` 是量化档位标签。
+- **`Qwen3.8-27B`** 是 GGUF 文件头里 `general.name` 的值，也就是模型自身的名字；`UD-Q4_K_S` 是量化档位标签。上游基座仓库是 `Qwen/Qwen3.8-27B`，量化由 Unsloth 产出——见第 0 节。
 - 决定可复现性的是**架构元数据 + SHA-256**，不是名字。请引用下表的元数据与哈希，而不是引用一个名称。
 - 本仓库**不包含权重**。若你换用另一个 27B GGUF，本仓库的显存/内存数字**不会自动适用**，需要重新测量。
 - 每个模型遵循**其各自上游许可**；本仓库的 MIT 许可不覆盖权重。
@@ -25,6 +25,56 @@ if your files are identical.
 
 ---
 
+## 0. 上游身份（从 GGUF 文件头直接读出，非推测）/ Upstream identity, read from the GGUF header
+
+下面的字段不是从文件名猜的，而是**解析 GGUF 元数据块**得到的。任何人都可以用同一方法复核。
+These fields were not inferred from the filename — they were **parsed out of the GGUF metadata block**.
+Anyone can reproduce this with the same method.
+
+### 语言模型 / The LLM
+
+| 元数据键 / Key | 值 / Value |
+|---|---|
+| `general.name` | **`Qwen3.8-27B`** |
+| `general.basename` | `Qwen3.8-27B` |
+| `general.base_model.0.name` | `Qwen3.8 27B` |
+| `general.base_model.0.organization` | **`Qwen`** |
+| `general.base_model.0.repo_url` | **<https://huggingface.co/Qwen/Qwen3.8-27B>**（已实测 HTTP 200 / verified reachable） |
+| `general.quantized_by` | **`Unsloth`** |
+| `general.repo_url` | <https://huggingface.co/unsloth> |
+| `general.license` | **`apache-2.0`**（文件内的声明，仍以上游模型页为准 / declared in the file; upstream page remains authoritative） |
+| `general.size_label` | `27B` |
+| `general.description` | Renewal of the beloved Qwen model, delivering unmatched intelligence density. |
+| `general.type` | `model` |
+| `general.architecture` | `qwen35`（866 tensors，50 个元数据键 / 866 tensors, 50 KV pairs） |
+
+### 视觉投影器 / The vision projector
+
+| 元数据键 / Key | 值 / Value |
+|---|---|
+| `general.name` | `Qwen3.8-27B` |
+| `general.type` | **`mmproj`** |
+| `general.size_label` | `461M` |
+| `general.architecture` | `clip` |
+| `general.file_type` | `1`（F16） |
+| `general.license` | `apache-2.0` |
+| `general.quantized_by` | `Unsloth` |
+| `clip.projector_type` | `qwen3vl_merger` |
+
+### 图像模型 / The image model
+
+| 项目 / Item | 值 / Value |
+|---|---|
+| 上游仓库 / Upstream repo | **<https://huggingface.co/Comfy-Org/Qwen-Image-2.1>**（已实测 HTTP 200） |
+| DiT 版本 / DiT variant | **Turbo**，INT8，`convrot`（旋转量化 / rotation-based quantisation） |
+| 文本编码器 / Text encoder | **Qwen3-VL-8B**，INT8，`convrot` |
+| VAE | BF16 |
+
+> 这三个 `.safetensors` 没有统一的"模型名"字段可比对，因此**文件哈希就是它们的身份**（见第 3 节）。
+> These three `.safetensors` files carry no single comparable "model name" field, so **their hashes are their
+> identity** (see section 3).
+
+---
 ## 1. 语言模型 / The LLM
 
 | 项目 / Item | 值 / Value |

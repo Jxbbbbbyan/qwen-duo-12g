@@ -22,6 +22,7 @@ The three image-model files come from upstream **`Comfy-Org/Qwen-Image-2.1`**.
 
 **运行环境 / Runtime：** llama.cpp **0.6.0-dev, build 11617, commit `14310190c`** · ComfyUI **0.41.0** · PyTorch **2.14.0+cu130**（CUDA **13.0**）· Python **3.13.14** · Windows 11 build **26200** · NVIDIA 驱动 **32.0.16.1692**
 
+**上游身份 / Upstream identity**（直接从 GGUF 文件头读出，非推测 / read from the GGUF header, not inferred）：组织 **Qwen** · 基座仓库 **`Qwen/Qwen3.8-27B`**（<https://huggingface.co/Qwen/Qwen3.8-27B>，已实测 HTTP 200）· 量化方 **Unsloth**（<https://huggingface.co/unsloth>）· `general.name` = **`Qwen3.8-27B`** · 元数据声明许可 **apache-2.0** · 投影器 `general.type` = **mmproj**（461M，F16）
 > **关于命名 / On the names.** `Qwen3.8-27B` 是本机为该文件使用的名字，`UD-Q4_K_S` 是量化档位标签。决定可复现性的是**架构元数据与 SHA-256**，不是名字——请引用哈希。本仓库**不含权重**；换用别的 27B GGUF，这里的显存/内存数字**不会自动适用**。另注意文本编码器是 **Qwen3-VL-8B**（hidden 4096），与 27B 的 `embedding_length` 5120 **不能互换**。
 > `Qwen3.8-27B` is the name used locally for this file; `UD-Q4_K_S` is the quantiser's tier label. What makes this reproducible is the **architecture metadata plus the SHA-256**, not the name — cite the hashes. This repo **ships no weights**; substitute a different 27B GGUF and the VRAM/RAM figures here **no longer apply**. Note the text encoder is **Qwen3-VL-8B** (hidden 4096) and is **not interchangeable** with the 27B's `embedding_length` 5120.
 
@@ -492,20 +493,20 @@ Budget **100 GiB or more** of free space, and keep models on an SSD — cold loa
 
 **中文。** 本仓库**不包含权重**。你需要自行从模型发布方获取上表列出的 5 个文件，并放到对应位置：
 
-- **Qwen3.8-27B 的 GGUF 与配套 `mmproj-F16.gguf`** — 由上游/社区量化发布方提供；请在 [Hugging Face 上的 Qwen 组织页](https://huggingface.co/Qwen) 定位与你所用模型对应的仓库，并按该仓库说明选择 UD-Q4_K_S 量化与配套 mmproj。本仓库不代为分发，也不保证你找到的就是本机用的那一份。
+- **`Qwen3.8-27B` 的 GGUF 与配套 `mmproj-F16.gguf`** — 上游基座仓库是 [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B)，本机使用的量化版本由 [Unsloth](https://huggingface.co/unsloth) 产出（两级信息都写在 GGUF 头里）。请在该仓库中选择 UD-Q4_K_S 档位并配同源 mmproj。本仓库不代为分发权重。
 - **Qwen-Image 2.1 的 DiT / 文本编码器 / VAE** — 放入 ComfyUI 的 `models\diffusion_models`、`models\text_encoders`、`models\vae`；文件名与期望字节数/SHA-256 见 [`comfyui/scripts/fetch_models.ps1`](comfyui/scripts/fetch_models.ps1) 的清单，模型页通常在 [Comfy-Org 组织页](https://huggingface.co/Comfy-Org)。
 - **ComfyUI 本体** — 本机用的是 **v0.41.0** 的 Windows 免安装包（[`comfyui/scripts/fetch_comfy.ps1`](comfyui/scripts/fetch_comfy.ps1) 里 pin 的就是这个版本的资产）；上游项目见 [comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI)。
 - **`llama-server.exe`** — CUDA 构建，来自 [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases)。本机使用一个 CUDA 12 构建，但**具体 release 标签/commit 未记录**，因此无法给出精确版本号。
 
 **English.** The repo **does not ship weights**. Obtain the 5 files listed above from their publishers and place them as mapped:
 
-- **The Qwen3.8-27B GGUF and its `mmproj-F16.gguf`** — published by upstream/community quantisers; locate the repository for your exact model on the [Qwen organisation page on Hugging Face](https://huggingface.co/Qwen) and follow that repository's instructions for the UD-Q4_K_S quantisation and the matching mmproj. This repo neither redistributes them nor guarantees you will find the same file used here.
+- **The `Qwen3.8-27B` GGUF and its `mmproj-F16.gguf`** — the upstream base repository is [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B), and the quantisation used here was produced by [Unsloth](https://huggingface.co/unsloth) (both facts are recorded inside the GGUF header). Pick the UD-Q4_K_S tier there together with the matching mmproj. This repo does not redistribute the weights.
 - **Qwen-Image 2.1 DiT / text encoder / VAE** — place into ComfyUI's `models\diffusion_models`, `models\text_encoders`, `models\vae`. Filenames plus expected byte counts and SHA-256 values are in the manifest inside [`comfyui/scripts/fetch_models.ps1`](comfyui/scripts/fetch_models.ps1); model pages are usually under the [Comfy-Org organisation](https://huggingface.co/Comfy-Org).
 - **ComfyUI itself** — this machine ran the **v0.41.0** Windows portable build (the exact asset pinned in [`comfyui/scripts/fetch_comfy.ps1`](comfyui/scripts/fetch_comfy.ps1)); upstream project: [comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI).
 - **`llama-server.exe`** — a CUDA build from [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases). This machine used a CUDA 12 build, but **the exact release tag/commit was not recorded**, so no precise version can be given.
 
-> 每个模型遵循**其各自的上游许可**（部分可能含非商用或使用范围限制），请以模型发布页的许可文本为准——本仓库的 MIT 许可**不覆盖**这些权重。
-> Each model is governed by **its own upstream licence** (some may restrict commercial use or scope). The licence published with each model is authoritative; this repo's MIT licence **does not** cover those weights.
+> 每个模型遵循**其各自的上游许可**。本机这批文件的 GGUF 头部声明 **apache-2.0**，但那只是文件里的声明，**请仍以上游模型页的许可文本为准**——本仓库的 MIT 许可**不覆盖**这些权重。
+> Each model is governed by **its own upstream licence**. The GGUF headers of these local files declare **apache-2.0**, but that is only what the file records — **the licence text on each upstream model page remains authoritative**. This repo's MIT licence **does not** cover those weights.
 
 ### 启动 / Run
 
