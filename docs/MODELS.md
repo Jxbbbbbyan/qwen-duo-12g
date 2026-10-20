@@ -75,6 +75,54 @@ Anyone can reproduce this with the same method.
 > identity** (see section 3).
 
 ---
+## 0.5 下载来源与哈希验证 / Download sources and hash verification
+
+### 确切下载地址 / Exact download URLs
+
+```text
+# unsloth/Qwen3.8-27B-GGUF
+https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_S.gguf
+https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/mmproj-F16.gguf
+
+# Comfy-Org/Qwen-Image-2.1
+https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors
+https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors
+https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors
+```
+
+### 交叉验证结果 / Cross-check result
+
+核对方式：把上游 Hugging Face API 返回的 **LFS oid**（即该文件的 SHA-256）与本机 `Get-FileHash -Algorithm SHA256`
+的计算值逐一比对。**五个文件全部一致**（核对日 / checked 2026-10-21）：
+
+| 文件 / File | 上游 LFS sha256 | 本机计算值 | 结果 |
+|---|---|---|---|
+| `Qwen3.8-27B-UD-Q4_K_S.gguf` | `75bc9c8a…64017` | 同左 / same | ✅ |
+| `mmproj-F16.gguf` | `cbb841a9…b4e43e` | 同左 / same | ✅ |
+| `qwen_image_2.1_turbo_int8_convrot.safetensors` | `8144a018…67314c` | 同左 / same | ✅ |
+| `qwen3vl_8b_int8_convrot.safetensors` | `8bfd0f6e…452e8f` | 同左 / same | ✅ |
+| `qwen_image_2.1_vae_bf16.safetensors` | `bb21f747…876b7c9` | 同左 / same | ✅ |
+
+> 这意味着：本机那五个文件与公开上游**字节级相同**，不是同名不同物。
+> 你只要下载后核对哈希，就能确认自己跑的是同一批权重。
+>
+> These five local files are **byte-identical to the public upstream artifacts**, not merely same-named.
+> Verify the hashes after downloading to confirm you are running the same weights.
+
+### 两个容易踩的坑 / Two easy mistakes
+
+1. **基座仓库里没有 GGUF。** [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B) 放的是原始 BF16 分片
+   （18 个 `model-*.safetensors`）与 `LICENSE`、tokenizer 等；**GGUF 与 mmproj 由 Unsloth 的仓库发布**。
+2. **同仓库还有十几个量化档位**（Q2 到 Q8、IQ 系列）。本仓库的显存/内存数字**只对应 UD-Q4_K_S**，
+   换档位必须重测——例如 `UD-Q4_K_M` 是 16,464,440,224 B，比本档大 1.1 GB，12 GB 显存下的 `-ngl` 会不同。
+
+1. **The base repo has no GGUF.** [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B) holds the original BF16
+   shards plus `LICENSE` and tokenizer files; **the GGUF and mmproj are published by Unsloth**.
+2. **That GGUF repo also lists a dozen other quant tiers** (Q2 through Q8, plus the IQ series). The VRAM/RAM
+   figures here apply **only to UD-Q4_K_S**; any other tier must be re-measured - e.g. `UD-Q4_K_M` is
+   16,464,440,224 B, about 1.1 GB larger, and the workable `-ngl` on 12 GB will differ.
+
+---
 ## 1. 语言模型 / The LLM
 
 | 项目 / Item | 值 / Value |

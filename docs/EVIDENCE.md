@@ -66,27 +66,47 @@ nextn_predict_layers      = 1
 
 同样把 27B 塞进 12 GB 显存，两种做法的实测差异：
 
-| 配置 | VRAM | RAM 占用 | 关键机制 |
-|---|---|---|---|
-| `-ngl 44`（纯按层切分） | 11,552 MiB | **96.1 %** | CPU 侧张量保留为 **可回收的 mmap 文件页**，系统内存吃紧时能驱逐 |
-| 100K 上下文 / `-ngl 42` | 11,814 MiB | **99.0 %** | 同上，但上下文更大 |
-| `-ngl 48` | — | — | **OOM**（显存不足，进程被杀）。该次运行的上下文长度**未记录**，不要假定它等于 64K 或 100K。 |
-| `-ncffn` 张量覆盖 | — | **99.3 %**，13.4 GB **私有提交内存** | 把张量**拷贝**进匿名私有内存，**不可驱逐**，直接顶死提交上限 |
+**测量阶段 / Measurement stage**（这一列必读：不同阶段的读数不可互相比较 / the stage column is mandatory reading: readings from different stages are not comparable）：
 
-> **这是本项目最重要的一条实测发现**：`-ncffn` 看起来"更精细地把 FFN 放 CPU"，
+| 配置 | 测量阶段 / Stage | VRAM | 物理内存占用 / RAM | 关键机制 |
+|---|---|---|---:|---|
+| `-ngl 44`（纯按层切分） | **运行期**运行推理 / run time | 11,552 MiB | **96.1 %** | CPU 侧张量保留为**可回收的 mmap 文件页**，内存吃紧时可被驱逐 |
+| 100K 上下文 / `-ngl 42` | **运行期** / run time | 11,814 MiB | **99.0 %** | 同上，但上下文更大 |
+| `-ngl 48` | — | — | — | **OOM**。该次运行的上下文长度**未记录**，不要假定等于 64K 或 100K。 |
+| `-ncffn` 张量覆盖 | **运行期** / run time | — | **99.3 %**，另有 13.4 GB 进程**私有提交内存** | 把张量**拷贝**进匿名私有内存，不可驱逐 |
+
+> **这是本项目最重要的一条实测发现**：`-ncffn` 看起来更精细地把 FFN 放 CPU，
 > 但它实际做的是**拷贝**，生成匿名私有页，操作系统无法回收；
 > 而 `-ngl` 的部分卸载让 CPU 侧张量停留在 mmap 映射的文件页上，**可以被页回收器驱逐**。
-> 在 16 GB 内存的机器上，这个差别就是"能跑"和"卡死"的差别。
+>
+> **量级要说清楚 / Say the magnitude honestly.** 99.3 % 降到 96.1 % 的差别是
+> **3.2 个百分点**，不是内存压力被消除了。两个配置**都远高于**本项目自设的 90 % 安全线。
+> 它真正改变的是这些页**能否被回收**，而不是占用了多少。
+> 另外 13.4 GB 是进程的**私有提交内存（private committed memory）**，不是"从物理内存里省出的 13.4 GB"，
+> 这两个量不能混为一谈。
+>
+> The 99.3 % to 96.1 % change is **3.2 percentage points**, not the elimination of memory pressure;
+> both configurations sit well above this project's own 90 % safety line. What it changes is
+> *whether those pages can be reclaimed*, not how much is occupied. The 13.4 GB figure is the
+> process's **private committed memory**, not "13.4 GB of physical RAM saved" - different quantities.
 
 ### 页锁定（mlock）的代价
 
-| 配置 | RAM | 空闲 |
-|---|---|---|
-| `-lm mmap+mlock` | 94.2 % | **0.93 GiB** ← 几乎窒息 |
-| `-lm mmap`（本项目默认） | **29.7 %** | 宽裕 |
+| 配置 | 测量阶段 / Stage | 物理内存占用 / RAM | 空闲 / Free |
+|---|---|---|---:|
+| `-lm mmap+mlock` | 加载/待机 / load & standby | 94.2 % | **0.93 GiB** ← 几乎窒息 |
+| `-lm mmap`（本项目默认） | 加载/待机 / load & standby | **29.7 %** | 宽裕 |
 
-> `mlock` 把模型页钉死在物理内存里，对 15 GB 模型来说等于把整机内存锁死。
-> 本项目**明确不使用 mlock**。
+> **不要把这张表的 29.7 % 和上表的 96.1 % 放在一起比较。**
+> 上表是**推理运行期**读数，这张表是**加载/待机**阶段读数；工作负载不同，
+> 差异主要来自阶段差异，而不是 mlock 与 mmap 的差异本身。
+> 同一个 mmap 配置在运行期的读数就是上表的 96.1 %。
+>
+> **Do not compare the 29.7 % here with the 96.1 % above.** The first table is measured **during
+> inference**, this one at **load/standby**. Different workloads - the gap is mostly the stage
+> difference, not the mlock-versus-mmap difference. The same mmap configuration reads 96.1 % at run time.
+>
+> `mlock` 把模型页钉死在物理内存里，对 15 GB 模型来说等于把整机内存锁死。本项目**明确不使用 mlock**。
 
 ---
 

@@ -308,7 +308,7 @@ Fully automatic, no manual switching. The console (a Node.js process) is the sch
 **中文。** 多数"小显存跑大模型"的教程会教你**把权重卸载到系统内存**。在 16 GB 内存的机器上这条路会直接把机器拖死。我们的做法是反过来的：
 
 - **`-ngl` 部分卸载**：GPU 装得下的层上显存，其余层**保持内存映射（mmap）的文件页**——这些页**可被操作系统回收**，不会像"复制进内存"那样锁死物理内存。也就是说：**CPU 侧权重仍然存在，但以"磁盘后备、可驱逐"的形式存在，而不是被钉死在物理内存里。**
-- **显式避免 `-ncffn`**：`--n-cpu-ffn` 走 tensor override，会把 CPU 侧张量**复制成匿名私有内存**。实测对比：`-ncffn` 时进程私有内存 **13.4 GB**、物理内存占用 **99.3%**；改用纯 `-ngl 44` 后降到 **96.1%**。**这是本项工作最重要的一个发现。**
+- **显式避免 `-ncffn`**：`--n-cpu-ffn` 走 tensor override，会把 CPU 侧张量**复制成匿名私有内存**。实测对比：`-ncffn` 时进程私有内存 **13.4 GB**、物理内存占用 **99.3%**；改用纯 `-ngl 44` 后降到 **96.1%**——**只差 3.2 个百分点，两者都仍高于 90% 安全线**。真正变的不是"占了多少"，而是"这些页能不能被回收"。**这是本项工作最重要的一个发现。**
 - **`-lm mmap` 而非 `mmap+mlock`**：`mlock` 会把页锁在物理内存里，实测内存直接冲到 **94.2%（可用仅 0.93 GiB）**；改成纯 `mmap` 后回落到 **29.7%**（该读数取自加载/待机阶段的采样，与运行期 96.1% 不是同一时点，两者口径不同）。
 - **ComfyUI `--fast-disk`**：强制磁盘后备的动态加载/卸载，避免权重被提升进内存。
 - **32 GB 页面文件**：兜底，把"提交不足导致崩溃"变成"可恢复的换页"。本机页面文件由 **8,107 MB** 提升到 **32,768 MB**，提交上限达到 **47.94 GiB**，剩余提交余量 **39.39 GiB**（快照值，非恒定保证）。
@@ -496,14 +496,36 @@ Budget **100 GiB or more** of free space, and keep models on an SSD — cold loa
 - **`Qwen3.8-27B` 的 GGUF 与配套 `mmproj-F16.gguf`** — 上游基座仓库是 [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B)，本机使用的量化版本由 [Unsloth](https://huggingface.co/unsloth) 产出（两级信息都写在 GGUF 头里）。请在该仓库中选择 UD-Q4_K_S 档位并配同源 mmproj。本仓库不代为分发权重。
 - **Qwen-Image 2.1 的 DiT / 文本编码器 / VAE** — 放入 ComfyUI 的 `models\diffusion_models`、`models\text_encoders`、`models\vae`；文件名与期望字节数/SHA-256 见 [`comfyui/scripts/fetch_models.ps1`](comfyui/scripts/fetch_models.ps1) 的清单，模型页通常在 [Comfy-Org 组织页](https://huggingface.co/Comfy-Org)。
 - **ComfyUI 本体** — 本机用的是 **v0.41.0** 的 Windows 免安装包（[`comfyui/scripts/fetch_comfy.ps1`](comfyui/scripts/fetch_comfy.ps1) 里 pin 的就是这个版本的资产）；上游项目见 [comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI)。
-- **`llama-server.exe`** — CUDA 构建，来自 [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases)。本机使用一个 CUDA 12 构建，但**具体 release 标签/commit 未记录**，因此无法给出精确版本号。
+- **`llama-server.exe`** — CUDA 12 构建，来自 [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases)。本机二进制自报版本：**`0.6.0-dev`，build `11617`，commit `14310190c`**（Clang 20.1.8，Windows x86_64）。
 
 **English.** The repo **does not ship weights**. Obtain the 5 files listed above from their publishers and place them as mapped:
 
 - **The `Qwen3.8-27B` GGUF and its `mmproj-F16.gguf`** — the upstream base repository is [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B), and the quantisation used here was produced by [Unsloth](https://huggingface.co/unsloth) (both facts are recorded inside the GGUF header). Pick the UD-Q4_K_S tier there together with the matching mmproj. This repo does not redistribute the weights.
 - **Qwen-Image 2.1 DiT / text encoder / VAE** — place into ComfyUI's `models\diffusion_models`, `models\text_encoders`, `models\vae`. Filenames plus expected byte counts and SHA-256 values are in the manifest inside [`comfyui/scripts/fetch_models.ps1`](comfyui/scripts/fetch_models.ps1); model pages are usually under the [Comfy-Org organisation](https://huggingface.co/Comfy-Org).
 - **ComfyUI itself** — this machine ran the **v0.41.0** Windows portable build (the exact asset pinned in [`comfyui/scripts/fetch_comfy.ps1`](comfyui/scripts/fetch_comfy.ps1)); upstream project: [comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI).
-- **`llama-server.exe`** — a CUDA build from [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases). This machine used a CUDA 12 build, but **the exact release tag/commit was not recorded**, so no precise version can be given.
+- **`llama-server.exe`** — a CUDA 12 build from [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases). The binary reports itself as **`0.6.0-dev`, build `11617`, commit `14310190c`** (Clang 20.1.8, Windows x86_64).
+
+### 直接下载地址 / Direct download URLs
+
+上面 5 个文件的**确切下载地址**（已核对：上游 LFS 的 sha256 与本机计算值逐一相同，核对日 2026-10-21）。
+**Exact download URLs** for all five files. Verified: the upstream LFS sha256 matches this machine's computed value for every file (checked 2026-10-21).
+
+```text
+# LLM 与视觉投影器 / LLM and projector — repo: unsloth/Qwen3.8-27B-GGUF
+https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_S.gguf
+https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/mmproj-F16.gguf
+
+# 图像模型 / image stack — repo: Comfy-Org/Qwen-Image-2.1
+https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors
+https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors
+https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors
+```
+
+> 基座模型仓库是 [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B)（含原始 BF16 权重与 LICENSE），
+> 但**它本身不含 GGUF / mmproj**——GGUF 由 Unsloth 量化发布。要复现本仓库的数字，请用上表这份 GGUF，不要用别的量化档位。
+> The base repo [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B) holds the original BF16 weights and the
+> LICENSE, but **contains no GGUF or mmproj** — Unsloth publishes those. To reproduce these numbers use the
+> exact GGUF above, not another quantisation tier.
 
 > 每个模型遵循**其各自的上游许可**。本机这批文件的 GGUF 头部声明 **apache-2.0**，但那只是文件里的声明，**请仍以上游模型页的许可文本为准**——本仓库的 MIT 许可**不覆盖**这些权重。
 > Each model is governed by **its own upstream licence**. The GGUF headers of these local files declare **apache-2.0**, but that is only what the file records — **the licence text on each upstream model page remains authoritative**. This repo's MIT licence **does not** cover those weights.
@@ -602,6 +624,14 @@ The ComfyUI launcher [`comfyui/start_qwen.bat`](comfyui/start_qwen.bat) uses `--
 | [`docs/VERIFY_EXTRACTION.md`](docs/VERIFY_EXTRACTION.md) | 模型包解压与校验注意事项 / extraction and verification notes |
 | [`docs/LONGPATH_PROOF.md`](docs/LONGPATH_PROOF.md) | Windows 长路径限制的实证 / long-path evidence |
 | [`docs/archive/`](docs/archive/) | 历史工程记录（计划、执行日记、验收矩阵）/ historical records — **非当前结论** / **not current conclusions** |
+
+### 复现报告与问题 / Reproduction reports and bugs
+
+- **硬件/复现报告** → 请发到 [Discussions](https://github.com/Jxbbbbbyan/qwen-duo-12g/discussions) 的 "Hardware & reproduction reports"。请附上：GPU 型号与显存、内存容量、五个模型文件是否与 [`docs/MODELS.md`](docs/MODELS.md) 的哈希一致、启动参数、以及一轮的耗时。
+- **缺陷 / bug** → 请开 [Issue](https://github.com/Jxbbbbbyan/qwen-duo-12g/issues)，附日志片段（`C:\ComfyUI\logs\`）与你的 environment。
+
+- **Hardware / reproduction reports** → please post in [Discussions](https://github.com/Jxbbbbbyan/qwen-duo-12g/discussions) under "Hardware & reproduction reports", including GPU and VRAM, RAM, whether your five model files match the hashes in [`docs/MODELS.md`](docs/MODELS.md), your flags, and one round of timings.
+- **Bugs** → please open an [Issue](https://github.com/Jxbbbbbyan/qwen-duo-12g/issues) with a log excerpt from `C:\ComfyUI\logs\` and your environment.
 
 > `docs/EVIDENCE.md` 是**人工汇总的实测记录**，不是原始日志的完整存档。若你要独立复核，请按你自己机器上的条件重测；本仓库不把汇总值当作比原始数据更强的证据。
 > `docs/EVIDENCE.md` is a **manually summarised measurement record**, not a full archive of raw logs. To independently verify, re-measure under your own conditions; this repository does not present the summary as stronger evidence than it is.
