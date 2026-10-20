@@ -1,14 +1,46 @@
 # Qwen Duo 12G
 
-**在 12 GB 显存 + 16 GB 内存的普通 PC 上，串行运行两个大模型：Qwen3.8-27B（4-bit 大语言模型）与 Qwen-Image 2.1（图像生成）。**
+**在 12 GB 显存 + 16 GB 内存的普通 PC 上，串行运行两个本地模型。**
 
-**Run two large models — Qwen3.8-27B (a 4-bit LLM) and Qwen-Image 2.1 (image generation) — serially on one ordinary PC with a 12 GB GPU and only 16 GB of system RAM.**
+**Run two local models — serially — on one ordinary PC with a 12 GB GPU and only 16 GB of system RAM.**
+
+## 确切的模型与版本 / Exact models and versions
+
+本节是硬事实：README 里每个数字都对应下面这几个文件，可按字节数与 SHA-256 核对。完整清单见 [`docs/MODELS.md`](docs/MODELS.md)。
+These are the hard facts: every number in this repo corresponds to the files below, verifiable by byte count and SHA-256. Full manifest in [`docs/MODELS.md`](docs/MODELS.md).
+
+| 角色 / Role | 确切文件名 / Exact file | 字节数 / Bytes | SHA-256（首 16 位 / first 16 hex） |
+|---|---|---:|---|
+| **LLM** | `Qwen3.8-27B-UD-Q4_K_S.gguf`（架构 `qwen35`，65 层，原生上下文 262144 / 65 blocks, native ctx 262144） | 15,358,213,024 | `75bc9c8adba2842e…` |
+| 视觉投影器 / projector | `mmproj-F16.gguf`（`qwen3vl_merger`，跑在 CPU / runs on CPU） | 927,607,488 | `cbb841a9ee0636b2…` |
+| **图像 DiT** | `qwen_image_2.1_turbo_int8_convrot.safetensors` | 7,256,787,829 | `8144a0182964aa84…` |
+| 文本编码器 / text encoder | `qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 | `8bfd0f6e12abf2d2…` |
+| VAE | `qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 | `bb21f7473051e1ac…` |
+
+图像模型的三个文件来自上游 **`Comfy-Org/Qwen-Image-2.1`**（下载清单含 ModelScope 与 hf-mirror 两个源）。
+The three image-model files come from upstream **`Comfy-Org/Qwen-Image-2.1`**.
+
+**运行环境 / Runtime：** llama.cpp **0.6.0-dev, build 11617, commit `14310190c`** · ComfyUI **0.41.0** · PyTorch **2.14.0+cu130**（CUDA **13.0**）· Python **3.13.14** · Windows 11 build **26200** · NVIDIA 驱动 **32.0.16.1692**
+
+> **关于命名 / On the names.** `Qwen3.8-27B` 是本机为该文件使用的名字，`UD-Q4_K_S` 是量化档位标签。决定可复现性的是**架构元数据与 SHA-256**，不是名字——请引用哈希。本仓库**不含权重**；换用别的 27B GGUF，这里的显存/内存数字**不会自动适用**。另注意文本编码器是 **Qwen3-VL-8B**（hidden 4096），与 27B 的 `embedding_length` 5120 **不能互换**。
+> `Qwen3.8-27B` is the name used locally for this file; `UD-Q4_K_S` is the quantiser's tier label. What makes this reproducible is the **architecture metadata plus the SHA-256**, not the name — cite the hashes. This repo **ships no weights**; substitute a different 27B GGUF and the VRAM/RAM figures here **no longer apply**. Note the text encoder is **Qwen3-VL-8B** (hidden 4096) and is **not interchangeable** with the 27B's `embedding_length` 5120.
+
+## 先看限制 / Limits first
+
+往下读之前，请先确认这三条你能接受。它们不是免责声明，是这台机器的物理结果：
+Before reading on, check that you accept these three. They are not disclaimers — they are what this hardware does:
+
+1. **不是并行 / Not parallel** — 同一时刻只有一个模型驻留显存，每轮都要切换，**SSD 热态下也要数十秒**。Only one model is GPU-resident at a time; every round pays a switch, **tens of seconds even on a warm SSD**.
+2. **约 4 tok/s** — 一次完整运行实测 **6 分 41 秒**，其中出图只占 80 秒，时间线见 [`docs/RUN_LOG.md`](docs/RUN_LOG.md)。A full run measured **6 min 41 s** end to end, of which rendering was 80 s.
+3. **物理内存占用 96%** — 这些页大部分可被系统回收，但留给其他程序的空间很小。Most of those pages are reclaimable, but little room is left for anything else.
+
+**直接跳到 / Jump to：** [一次真实运行的时间线](docs/RUN_LOG.md) · [全部实测数字](docs/EVIDENCE.md) · [快速开始](#快速开始--quick-start) · [已知限制](#边界与诚实声明--honest-limitations)
 
 **机制：一个模型驻留显存，另一个以"磁盘后备的可回收内存映射页"待机；由总控台按任务阶段自动装载、腾退、回装——这才是"12 GB 装下两个模型"的关键。**
 
 **Mechanism: one model resides in VRAM while the other stands by as reclaimable, disk-backed memory-mapped pages; the console loads, evicts and reloads automatically per stage — this is what makes "two models in 12 GB" work.**
 
-![鳄鱼骑自行车的卡通图 / a cartoon crocodile riding a bicycle](screenshots/01-crocodile-cartoon.png)
+[![鳄鱼骑自行车的卡通图 / a cartoon crocodile riding a bicycle](screenshots/preview/01-crocodile-cartoon.jpg)](screenshots/01-crocodile-cartoon.png)
 
 *上图是本仓库流程的产出：Qwen3.8 写提示词 → Qwen-Image 2.1 出图。*
 *The image above was produced by this pipeline — Qwen3.8 authors the prompt, Qwen-Image 2.1 renders it.*
@@ -43,6 +75,8 @@
 
 ## 目录 / Table of contents
 
+- [确切的模型与版本 / Exact models and versions](#确切的模型与版本--exact-models-and-versions)
+- [先看限制 / Limits first](#先看限制--limits-first)
 - [总述 / Overview](#总述--overview)
 - [分述 / Feature breakdown](#分述--feature-breakdown)
   - [一 · 一体化串行流水线 / Unified serial pipeline](#分述一--一体化串行流水线全自动--unified-serial-pipeline-fully-automated)
@@ -343,15 +377,17 @@ All produced by this pipeline on this machine (Qwen3.8 authors the prompt → Qw
 
 | 参考图 + 指令 → 图像 / Reference + instruction → image | 文生图·水彩 / Text → image, watercolour |
 |---|---|
-| ![把卡通鳄鱼改成水彩风格的方形输出 / the cartoon crocodile re-rendered as a square watercolour](screenshots/02-crocodile-watercolor.png) | ![橘猫坐在窗台上晒太阳的水彩画 / a ginger cat on a windowsill in the sun, watercolour](screenshots/03-cat-watercolor.png) |
+| [![把卡通鳄鱼改成水彩风格的方形输出 / the cartoon crocodile re-rendered as a square watercolour](screenshots/preview/02-crocodile-watercolor.jpg)](screenshots/02-crocodile-watercolor.png) | [![橘猫坐在窗台上晒太阳的水彩画 / a ginger cat on a windowsill in the sun, watercolour](screenshots/preview/03-cat-watercolor.jpg)](screenshots/03-cat-watercolor.png) |
 | *"把这张图改成水彩画风格"* → 模型看图后重写提示词，再以原图为参考重绘。输出跟随参考图的方形画幅（1920×1920）。 | *"橘猫坐在窗台上晒太阳，水彩风格"* · 1920×1088 |
 | *"turn this into a watercolour"* → the model rewrites the prompt from the image, then re-renders against it. Output follows the reference's square aspect (1920×1920). | *"a ginger cat on a windowsill in the sun, watercolour"* · 1920×1088 |
 
 | 2K 大图 / 2K render |
 |---|
-| ![雨夜霓虹街道的电影感画面 / a neon street on a rainy night, cinematic](screenshots/04-neon-street-2k.png) |
+| [![雨夜霓虹街道的电影感画面 / a neon street on a rainy night, cinematic](screenshots/preview/04-neon-street-2k.jpg)](screenshots/04-neon-street-2k.png) |
 | *"雨夜的霓虹街道，电影感"* · 2560×1440 · *"a neon street on a rainy night, cinematic"* |
 
+> 上面的图是压缩预览（合计约 1.2 MiB），**点击可看原始全分辨率图**（原图合计约 18 MiB，仍保留在 `screenshots/` 下）。
+> Images above are compressed previews (~1.2 MiB total); **click through for the original full-resolution files** (~18 MiB total, still kept under `screenshots/`).
 > 提示词由模型的系统指令约束在 **130 词以内**（`Keep it under 130 words`），此处不逐字统计实际词数。
 > The system instruction constrains prompts to **under 130 words**; the exact word count of each sample is not tabulated here.
 
@@ -379,7 +415,11 @@ qwen-duo-12g/
 │   ├── set-pagefile.ps1       页面文件配置（带校验、备份与回滚）/ pagefile with validation, backup, rollback
 │   ├── fw-on.ps1              离线验证：添加出站阻断 / offline proof: add blocks
 │   └── fw-off.ps1             离线验证：清理并回读确认 / remove and verify
+├── assets/
+│   └── social-preview.png     链接预览图 1280x640 / link-preview card
 ├── docs/
+│   ├── MODELS.md              ★ 确切模型文件、字节数、SHA-256、运行环境 / exact manifest
+│   ├── RUN_LOG.md             ★ 一次真实运行的带时间戳时间线 / a real timestamped run
 │   ├── EVIDENCE.md            ★ 全部实测数字的出处 / provenance of every number
 │   ├── PREFLIGHT.md           机器预检 / machine preflight
 │   ├── OOM_MITIGATION.md      显存不足排查阶梯 / OOM mitigation ladder
@@ -387,6 +427,7 @@ qwen-duo-12g/
 │   ├── LONGPATH_PROOF.md      Windows 长路径实证 / long-path evidence
 │   └── archive/               历史工程记录（非当前说明）/ historical records
 └── screenshots/               实测出图样张 / sample renders
+    └── preview/               压缩预览（README 使用）/ compressed previews used by the README
 ```
 
 | 目录 / Directory | 内容 / Content |
@@ -395,7 +436,7 @@ qwen-duo-12g/
 | [`comfyui/`](comfyui/) | ComfyUI 启停脚本与全部自动化：获取、解压、校验、放置、工作流安装、资源测量、阶段门禁。ComfyUI launch/stop scripts and all automation: fetch, extract, verify, place, install workflows, measure, gate. |
 | [`tools/`](tools/) | 需要管理员权限的主机级工具：页面文件、离线验证用的防火墙规则。Admin-level host utilities: pagefile, and firewall rules for the offline proof. |
 | [`docs/`](docs/) | 实测证据、预检、OOM 缓解、解压校验、长路径实证；历史记录在 [`docs/archive/`](docs/archive/)。Evidence, preflight, OOM mitigation, extraction checks, long-path proof; history under [`docs/archive/`](docs/archive/). |
-| [`screenshots/`](screenshots/) | 本机实测出图样张。Sample renders produced on this machine. |
+| [`screenshots/`](screenshots/) | 本机实测出图样张；`preview/` 是 README 用的压缩预览，点击可回原图。Sample renders produced on this machine; `preview/` holds the compressed previews the README embeds, each linking back to the original. |
 
 ---
 
@@ -552,6 +593,8 @@ The ComfyUI launcher [`comfyui/start_qwen.bat`](comfyui/start_qwen.bat) uses `--
 
 | 文档 / Document | 内容 / Content |
 |---|---|
+| [`docs/MODELS.md`](docs/MODELS.md) | ★ 确切模型文件、字节数、SHA-256、GGUF 元数据与运行环境 / exact files, hashes, metadata, runtime |
+| [`docs/RUN_LOG.md`](docs/RUN_LOG.md) | ★ 一次真实运行的带时间戳时间线（含一次被模型拒绝的记录）/ a real run, timestamped, plus a refusal |
 | [`docs/EVIDENCE.md`](docs/EVIDENCE.md) | ★ 全部实测数字、测量口径与已知限制 / every measurement, its basis and the known limits |
 | [`docs/PREFLIGHT.md`](docs/PREFLIGHT.md) | 部署前的机器预检与结论 / machine preflight and conclusions |
 | [`docs/OOM_MITIGATION.md`](docs/OOM_MITIGATION.md) | 显存不足时的缓解阶梯（排查指南）/ OOM mitigation ladder, a troubleshooting guide |
