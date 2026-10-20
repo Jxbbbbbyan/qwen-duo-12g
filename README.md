@@ -316,7 +316,7 @@ Fully automatic, no manual switching. The console (a Node.js process) is the sch
 **English.** Most "run a big model on a small GPU" guides tell you to **offload weights into system RAM**. On a 16 GB machine that path strangles the system. We do the opposite:
 
 - **Partial offload with `-ngl`**: layers that fit go to VRAM; the rest **stay as memory-mapped file pages**, which the OS **can reclaim**. In other words the CPU-side weights are still there — as **disk-backed, evictable** pages rather than something pinned into physical RAM.
-- **Explicitly avoiding `-ncffn`**: `--n-cpu-ffn` uses a tensor override that **copies** CPU-side tensors into anonymous private memory. Measured: with `-ncffn`, private memory reached **13.4 GB** and physical memory use **99.3%**; with plain `-ngl 44` it dropped to **96.1%**. **This is the single most important finding in this work.**
+- **Explicitly avoiding `-ncffn`**: `--n-cpu-ffn` uses a tensor override that **copies** CPU-side tensors into anonymous private memory. Measured: with `-ncffn`, private memory reached **13.4 GB** and physical memory use **99.3%**; with plain `-ngl 44` it dropped to **96.1%** — **a 3.2 percentage point difference, and both are still above the 90% line**. What changed is not how much is occupied but whether those pages can be reclaimed. **This is the single most important finding in this work.**
 - **`-lm mmap`, not `mmap+mlock`**: `mlock` pins pages into physical memory, driving RAM to **94.2%** (only 0.93 GiB free); plain `mmap` brought it down to **29.7%** — note that reading was taken during load/standby sampling and is a different measurement point from the 96.1% run-time figure, so the two are not directly comparable.
 - **ComfyUI `--fast-disk`**: forces disk-backed dynamic loading, preventing weights from being promoted into RAM.
 - **A 32 GB pagefile** as a backstop, turning "commit failure crash" into "recoverable paging". On this machine the pagefile went from **8,107 MB** to **32,768 MB**, bringing the commit limit to **47.94 GiB** with **39.39 GiB** headroom (snapshot values, not a standing guarantee).
@@ -371,6 +371,26 @@ Note that the metadata's `context_length` is **262144** — that is the model's 
 
 ---
 
+### 精确卸载账本 / Exact offload ledger
+
+以生产参数 `-ngl 44 -c 65536 -np 1` 加载时，llama.cpp 自报并按 GGUF 张量表逐块复算（两侧总额分毫不差）：
+
+| 侧 / Side | 层 / Layers | 模型张量 / Model tensors | KV | SSM 状态 | 计算缓冲 | 合计 |
+|---|---|---:|---:|---:|---:|---:|
+| **显存 / VRAM** | **42 块 + output** | **9,733.30 MiB** | 792.00 | 96.63 | 431.75 | **11,053.68 MiB** |
+| **CPU / mmap** | **22 块 + token_embd + output_norm** | **4,568.20 MiB** | 360.00 | 52.99 | 52.39 | **5,033.58 MiB** |
+| CPU（另有）/ also | mmproj 视觉投影器 | 884.64 MiB | — | — | — | 884.64 MiB |
+
+三句话读法 / How to read it：
+
+1. **文件 14.29 GiB，显卡 12 GiB**——所以"必有层留在内存"是算术，不是选择。
+2. **只有 16 个全注意力层持有 KV**；48 个 SSM 层用约 150 MiB 的循环状态代替，这才是 64K 能在 16 GB 内存上成立的原因。
+3. **KV 必须量化**：同样 65,536 token，fp16 KV 要 4.00 GiB，q4_0 只要 1,152.00 MiB。
+
+完整的原始日志行、逐块字节推导、以及"换参数会怎样"见 [`docs/OFFLOAD.md`](docs/OFFLOAD.md)。
+Verbatim log lines, the per-block derivation and a flag-sensitivity table are in [`docs/OFFLOAD.md`](docs/OFFLOAD.md).
+
+---
 ## 更多样图 / More samples
 
 全部由本项目流程实测产出（Qwen3.8 写提示词 → Qwen-Image 2.1 出图）。
@@ -419,7 +439,7 @@ qwen-duo-12g/
 ├── assets/
 │   └── social-preview.png     链接预览图 1280x640 / link-preview card
 ├── docs/
-│   ├── MODELS.md              ★ 确切模型文件、字节数、SHA-256、运行环境 / exact manifest
+│   ├── OFFLOAD.md             ★ 精确卸载账本（层数与字节）/ exact offload ledger              ★ 确切模型文件、字节数、SHA-256、运行环境 / exact manifest
 │   ├── RUN_LOG.md             ★ 一次真实运行的带时间戳时间线 / a real timestamped run
 │   ├── EVIDENCE.md            ★ 全部实测数字的出处 / provenance of every number
 │   ├── PREFLIGHT.md           机器预检 / machine preflight
@@ -493,14 +513,14 @@ Budget **100 GiB or more** of free space, and keep models on an SSD — cold loa
 
 **中文。** 本仓库**不包含权重**。你需要自行从模型发布方获取上表列出的 5 个文件，并放到对应位置：
 
-- **`Qwen3.8-27B` 的 GGUF 与配套 `mmproj-F16.gguf`** — 上游基座仓库是 [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B)，本机使用的量化版本由 [Unsloth](https://huggingface.co/unsloth) 产出（两级信息都写在 GGUF 头里）。请在该仓库中选择 UD-Q4_K_S 档位并配同源 mmproj。本仓库不代为分发权重。
+- **`Qwen3.8-27B` 的 GGUF 与配套 `mmproj-F16.gguf`** — 上游基座仓库是 [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B)，本机使用的量化版本由 [Unsloth](https://huggingface.co/unsloth) 产出（两级信息都写在 GGUF 头里）。**GGUF 与 mmproj 不在这个基座仓库里**，而在 [`unsloth/Qwen3.8-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)；请在那里取 UD-Q4_K_S 档位并配同源 mmproj（确切下载地址见下方）。本仓库不代为分发权重。
 - **Qwen-Image 2.1 的 DiT / 文本编码器 / VAE** — 放入 ComfyUI 的 `models\diffusion_models`、`models\text_encoders`、`models\vae`；文件名与期望字节数/SHA-256 见 [`comfyui/scripts/fetch_models.ps1`](comfyui/scripts/fetch_models.ps1) 的清单，模型页通常在 [Comfy-Org 组织页](https://huggingface.co/Comfy-Org)。
 - **ComfyUI 本体** — 本机用的是 **v0.41.0** 的 Windows 免安装包（[`comfyui/scripts/fetch_comfy.ps1`](comfyui/scripts/fetch_comfy.ps1) 里 pin 的就是这个版本的资产）；上游项目见 [comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI)。
 - **`llama-server.exe`** — CUDA 12 构建，来自 [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases)。本机二进制自报版本：**`0.6.0-dev`，build `11617`，commit `14310190c`**（Clang 20.1.8，Windows x86_64）。
 
 **English.** The repo **does not ship weights**. Obtain the 5 files listed above from their publishers and place them as mapped:
 
-- **The `Qwen3.8-27B` GGUF and its `mmproj-F16.gguf`** — the upstream base repository is [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B), and the quantisation used here was produced by [Unsloth](https://huggingface.co/unsloth) (both facts are recorded inside the GGUF header). Pick the UD-Q4_K_S tier there together with the matching mmproj. This repo does not redistribute the weights.
+- **The `Qwen3.8-27B` GGUF and its `mmproj-F16.gguf`** — the upstream base repository is [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B), and the quantisation used here was produced by [Unsloth](https://huggingface.co/unsloth) (both facts are recorded inside the GGUF header). **The GGUF and mmproj are not in that base repository** — they live in [`unsloth/Qwen3.8-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF); take the UD-Q4_K_S tier there with the matching mmproj (exact URLs below). This repo does not redistribute the weights.
 - **Qwen-Image 2.1 DiT / text encoder / VAE** — place into ComfyUI's `models\diffusion_models`, `models\text_encoders`, `models\vae`. Filenames plus expected byte counts and SHA-256 values are in the manifest inside [`comfyui/scripts/fetch_models.ps1`](comfyui/scripts/fetch_models.ps1); model pages are usually under the [Comfy-Org organisation](https://huggingface.co/Comfy-Org).
 - **ComfyUI itself** — this machine ran the **v0.41.0** Windows portable build (the exact asset pinned in [`comfyui/scripts/fetch_comfy.ps1`](comfyui/scripts/fetch_comfy.ps1)); upstream project: [comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI).
 - **`llama-server.exe`** — a CUDA 12 build from [ggml-org/llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases). The binary reports itself as **`0.6.0-dev`, build `11617`, commit `14310190c`** (Clang 20.1.8, Windows x86_64).
@@ -616,7 +636,7 @@ The ComfyUI launcher [`comfyui/start_qwen.bat`](comfyui/start_qwen.bat) uses `--
 
 | 文档 / Document | 内容 / Content |
 |---|---|
-| [`docs/MODELS.md`](docs/MODELS.md) | ★ 确切模型文件、字节数、SHA-256、GGUF 元数据与运行环境 / exact files, hashes, metadata, runtime |
+| [`docs/OFFLOAD.md`](docs/OFFLOAD.md) | ★ 精确卸载账本：层数、KV、SSM 状态、计算缓冲的确切字节 / exact offload ledger in bytes | ★ 确切模型文件、字节数、SHA-256、GGUF 元数据与运行环境 / exact files, hashes, metadata, runtime |
 | [`docs/RUN_LOG.md`](docs/RUN_LOG.md) | ★ 一次真实运行的带时间戳时间线（含一次被模型拒绝的记录）/ a real run, timestamped, plus a refusal |
 | [`docs/EVIDENCE.md`](docs/EVIDENCE.md) | ★ 全部实测数字、测量口径与已知限制 / every measurement, its basis and the known limits |
 | [`docs/PREFLIGHT.md`](docs/PREFLIGHT.md) | 部署前的机器预检与结论 / machine preflight and conclusions |
