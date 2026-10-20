@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>千问3.8 对话总控台</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --dim:#8b93a3;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#4c8dff; --user:#1d2a44; --bot:#161a22; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.65 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+         display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:10px; padding:12px 18px;
+           border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; font-weight:600; }
+  .badge { font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
+  .badge.on { color:var(--ok); border-color:#1c3a26; background:#0f2418; }
+  .badge.off { color:var(--bad); border-color:#3d1a1a; background:#241010; }
+  .spacer { flex:1; }
+  select { background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 9px; font:inherit; }
+  #quit { background:#3a1d1d; color:#ffb3b3; border:1px solid #5a2a2a; border-radius:8px;
+          padding:7px 14px; font:inherit; cursor:pointer; }
+  #quit:hover { background:#4a2222; }
+  #log { height:0; overflow:auto; background:#0a0c10; border-bottom:1px solid var(--line);
+         font:12px/1.5 ui-monospace,Consolas,monospace; color:#8a93a5; transition:height .15s; padding:0 14px; }
+  #log.open { height:150px; padding:10px 14px; }
+  #chat { flex:1; overflow:auto; padding:18px; display:flex; flex-direction:column; gap:14px; }
+  .msg { max-width:min(860px,88%); padding:12px 15px; border-radius:12px; white-space:pre-wrap; word-break:break-word; }
+  .msg.user { align-self:flex-end; background:var(--user); border:1px solid #2a3a5c; }
+  .msg.bot  { align-self:flex-start; background:var(--bot); border:1px solid var(--line); }
+  .msg.err  { align-self:flex-start; background:#2a1414; border:1px solid #5a2a2a; color:#ffb3b3; }
+  .role { font-size:11px; color:var(--dim); margin-bottom:5px; letter-spacing:.5px; }
+  .think { font-size:12px; color:#7d8699; border-left:2px solid #2f3a4d; padding-left:10px;
+           margin:0 0 10px 0; white-space:pre-wrap; display:none; }
+  .think.show { display:block; }
+  .toggle { font-size:11px; color:var(--acc); cursor:pointer; user-select:none; }
+  footer { padding:12px 18px 16px; border-top:1px solid var(--line); background:var(--panel); }
+  .inputrow { display:flex; gap:10px; align-items:flex-end; }
+  textarea { flex:1; min-height:56px; max-height:220px; resize:vertical; background:#0c0e12; color:var(--fg);
+             border:1px solid var(--line); border-radius:10px; padding:10px 12px; font:inherit; }
+  #send { background:var(--acc); color:#fff; border:0; border-radius:10px; padding:12px 22px;
+          font:inherit; font-weight:600; cursor:pointer; }
+  #send:disabled { opacity:.45; cursor:not-allowed; }
+  .hint { font-size:11px; color:var(--dim); margin-top:7px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>千问3.8 对话总控台</h1>
+  <span class="badge" id="model">检测中…</span>
+  <span class="badge" id="ctxbadge">64K 上下文</span>
+  <span class="spacer"></span>
+  <select id="think" title="思考等级：越高越慢，也越容易过度谨慎">
+    <option value="off" selected>思考：关（最快）</option>
+    <option value="low">思考：低</option>
+    <option value="medium">思考：中</option>
+    <option value="high">思考：高</option>
+    <option value="xhigh">思考：极高</option>
+  </select>
+  <button id="logbtn" style="background:#0c0e12;color:#8b93a3;border:1px solid #262b36;border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer">日志</button>
+  <button id="quit" title="停止模型并关闭总控台">退出</button>
+</header>
+
+<div id="log"></div>
+
+<div id="chat">
+  <div class="msg bot">
+    <div class="role">Qwen3.8-27B · 64K</div>
+    准备好了，直接说事。<br>
+    <span style="color:#8b93a3;font-size:12px">这个总控台不会自己退出，只有你点右上角「退出」才会关闭。</span>
+  </div>
+</div>
+
+<footer>
+  <div class="inputrow">
+    <textarea id="input" placeholder="输入内容，Ctrl+Enter 发送…"></textarea>
+    <button id="send">发送</button>
+  </div>
+  <div class="hint">上下文 64K · 不会自动退出 · 关闭本页面前请先点右上角「退出」以释放模型显存</div>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let history = [];      // {role, content}
+let lastLen = 0;
+
+async function status() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    $('model').textContent = s.llama ? 'Qwen3.8 就绪' : '模型未就绪';
+    $('model').className = 'badge ' + (s.llama ? 'on' : 'off');
+    $('ctxbadge').textContent = `${Math.round(s.ctx / 1024)}K 上下文`;
+    if ($('think').value !== s.thinking && document.activeElement !== $('think')) $('think').value = s.thinking;
+    $('send').disabled = !!s.busy;
+  } catch { $('model').textContent = '总控台未响应'; $('model').className = 'badge off'; }
+}
+setInterval(status, 3000); status();
+
+async function pullLog() {
+  try {
+    const j = await (await fetch('/api/logs')).json();
+    if (j.lines.length !== lastLen) {
+      lastLen = j.lines.length;
+      $('log').textContent = j.lines.join('\n');
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+  } catch {}
+}
+setInterval(pullLog, 2500); pullLog();
+$('logbtn').onclick = () => $('log').classList.toggle('open');
+
+$('think').onchange = async () => {
+  try {
+    const r = await fetch('/api/thinking', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: $('think').value })
+    });
+    const j = await r.json();
+    if (j.error) alert(j.error);
+  } catch {}
+};
+
+function bubble(role, text, reasoning) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  if (role === 'bot') {
+    const r = document.createElement('div');
+    r.className = 'role';
+    r.textContent = 'Qwen3.8-27B';
+    d.appendChild(r);
+    if (reasoning && reasoning.trim()) {
+      const t = document.createElement('div');
+      t.className = 'think';
+      t.textContent = reasoning;
+      const tg = document.createElement('span');
+      tg.className = 'toggle';
+      tg.textContent = '显示思考链 ▾';
+      tg.onclick = () => {
+        const on = t.classList.toggle('show');
+        tg.textContent = on ? '隐藏思考链 ▴' : '显示思考链 ▾';
+      };
+      d.appendChild(tg);
+      d.appendChild(t);
+    }
+  }
+  const body = document.createElement('div');
+  body.textContent = text;
+  d.appendChild(body);
+  $('chat').appendChild(d);
+  $('chat').scrollTop = $('chat').scrollHeight;
+  return d;
+}
+
+async function send() {
+  const text = $('input').value.trim();
+  if (!text) return;
+  $('input').value = '';
+  bubble('user', text);
+  history.push({ role: 'user', content: text });
+  $('send').disabled = true;
+  const pending = bubble('bot', '生成中…');
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history })
+    });
+    const j = await r.json();
+    pending.remove();
+    if (j.ok) {
+      history.push({ role: 'assistant', content: j.content });
+      bubble('bot', j.content, j.reasoning);
+    } else {
+      bubble('err', '失败：' + j.error);
+      history.pop();
+    }
+  } catch (e) {
+    pending.remove();
+    bubble('err', '请求出错：' + e.message);
+    history.pop();
+  } finally { $('send').disabled = false; status(); }
+}
+
+$('send').onclick = send;
+$('input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+});
+
+$('quit').onclick = async () => {
+  if (!confirm('确定退出？模型会被停止并释放显存。')) return;
+  try { await fetch('/api/quit', { method: 'POST' }); } catch {}
+  document.body.innerHTML =
+    '<div style="margin:auto;text-align:center;color:#8b93a3;font:16px/1.8 \'Segoe UI\',sans-serif">' +
+    '<h2 style="color:#e6e9ef">已退出</h2>模型已停止，显存已释放。<br>' +
+    '可以关闭此页面。下次双击桌面「千问3.8 对话」重新启动。</div>';
+};
+</script>
+</body>
+</html>

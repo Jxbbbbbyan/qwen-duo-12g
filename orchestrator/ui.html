@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>千问总控台 · Qwen3.8 × Image 2.1</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --dim:#8b93a3; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  .wrap { max-width:1080px; margin:0 auto; padding:20px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+  h1 { font-size:18px; margin:0; font-weight:600; }
+  .badge { font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
+  .badge.llm { color:var(--ok); border-color:#1c3a26; background:#0f2418; }
+  .badge.rendering { color:var(--warn); border-color:#3d3117; background:#241d0f; }
+  .badge.switching { color:var(--acc); border-color:#1b2c4a; background:#0f1a2b; }
+  .grid { display:grid; grid-template-columns:1fr 380px; gap:16px; }
+  @media (max-width:900px){ .grid{ grid-template-columns:1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  label { display:block; font-size:12px; color:var(--dim); margin-bottom:6px; }
+  textarea { width:100%; min-height:96px; resize:vertical; background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:10px; font:inherit; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  select { background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 18px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #log { height:340px; overflow:auto; background:#0a0c10; border:1px solid var(--line); border-radius:8px; padding:10px; font:12px/1.55 ui-monospace,Consolas,monospace; color:#a9b2c3; white-space:pre-wrap; }
+  #out img { width:100%; border-radius:8px; margin-top:10px; display:none; }
+  .hint { font-size:12px; color:var(--dim); margin-top:8px; }
+  .pill { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>千问总控台</h1>
+    <span class="badge" id="phase"><span class="pill" style="background:#555"></span>连接中…</span>
+    <span class="badge" id="svc">—</span>
+    <span class="badge" id="idle">—</span>
+  </header>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <label>绘图任务（用中文说清楚要什么，详细提示词由 Qwen3.8 负责写）</label>
+        <textarea id="task" placeholder="例：一只骑在自行车上的鳄鱼，卡通风格&#10;例：雨夜霓虹灯下的老街，电影感"></textarea>
+        <div class="row" style="margin-top:10px">
+          <input type="file" id="imgfile" accept="image/*" style="color:var(--dim);font-size:12px">
+          <span class="hint" id="imginfo">（可选）选一张参考图 —— Qwen3.8 会看图写提示词，Image 2.1 以它为参考出图</span>
+        </div>
+        <img id="imgprev" alt="参考图" style="max-width:200px;border-radius:8px;margin-top:8px;display:none">
+        <div class="row">
+          <select id="mode">
+            <option value="1080p" selected>1080p（1920×1088，常规）</option>
+            <option value="2k">2K（2560×1440，复杂画面）</option>
+          </select>
+          <select id="think" title="Qwen3.8 思考等级：越高越慢，也越容易过度谨慎而拒绝">
+            <option value="off" selected>思考等级：关（最快）</option>
+            <option value="low">思考等级：低</option>
+            <option value="medium">思考等级：中</option>
+            <option value="high">思考等级：高</option>
+            <option value="xhigh">思考等级：极高（最慢）</option>
+          </select>
+          <button id="go">生成图片</button>
+          <span class="hint" id="tip"></span>
+        </div>
+        <div class="hint">切换思考等级需要重启 Qwen3.8（约 1-2 分钟）。实测：关=快但提示词简单；中=约 4 分钟；高/极高更慢。</div>
+        <div class="hint">流程：Qwen3.8 写提示词 → 3.8 退出 → ComfyUI 出图 → ComfyUI 退出 → 3.8 回来。关闭本页 60 秒后全部退出。</div>
+      </div>
+
+      <div class="card" id="out" style="margin-top:16px">
+        <label>输出</label>
+        <div id="outmsg" class="hint">还没有结果。</div>
+        <img id="outimg" alt="输出图片">
+      </div>
+    </div>
+
+    <div class="card">
+      <label>运行日志</label>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const logBox = $('log');
+let lastLen = 0;
+
+function setPhase(p){
+  const el = $('phase');
+  const color = p==='llm' ? '#3fb950' : p==='rendering' ? '#d29922' : p==='switching' ? '#4c8dff' : '#555';
+  const text  = p==='llm' ? 'Qwen3.8 待命' : p==='rendering' ? 'ComfyUI 出图中' : p==='switching' ? '切换中' : '空闲';
+  el.innerHTML = `<span class="pill" style="background:${color}"></span>${text}`;
+  el.className = 'badge ' + (p||'');
+}
+
+async function beat(){
+  try { const r = await fetch('/api/heartbeat'); const j = await r.json(); setPhase(j.phase); } catch {}
+}
+setInterval(beat, 5000); beat();
+
+async function poll(){
+  try {
+    const s = await (await fetch('/api/status')).json();
+    setPhase(s.phase);
+    $('svc').textContent = `Qwen3.8 ${s.llama?'●':'○'}  ComfyUI ${s.comfy?'●':'○'}`;
+    $('go').disabled = s.busy;
+    if (s.idleMs != null) $('idle').textContent = s.busy ? '执行中' :
+      `关闭后还剩 ${Math.max(0, Math.round((60000 - s.idleMs)/1000))}s 退出`;
+    const lg = await (await fetch('/api/logs')).json();
+    if (lg.lines.length !== lastLen) {
+      lastLen = lg.lines.length;
+      logBox.textContent = lg.lines.join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+  } catch {}
+}
+setInterval(poll, 2000); poll();
+
+let imgB64 = null;
+$('imgfile').onchange = () => {
+  const f = $('imgfile').files[0];
+  if (!f) { imgB64 = null; $('imgprev').style.display = 'none'; return; }
+  const rd = new FileReader();
+  rd.onload = () => {
+    const s = String(rd.result);
+    imgB64 = s.includes(',') ? s.slice(s.indexOf(',') + 1) : null;
+    $('imgprev').src = s;
+    $('imgprev').style.display = 'block';
+    $('imginfo').textContent = `${f.name} · ${Math.round(f.size / 1024)} KB`;
+  };
+  rd.readAsDataURL(f);
+};
+
+$('go').onclick = async () => {
+  const task = $('task').value.trim();
+  if (!task) { $('tip').textContent = '先写任务'; return; }
+  const mode = $('mode').value;
+  $('go').disabled = true;
+  $('outmsg').textContent = imgB64
+    ? '流程进行中…（Qwen3.8 正在看图写提示词，然后切到 ComfyUI 以你的图为参考出图）'
+    : '流程进行中…（会先让 Qwen3.8 写提示词，再切到 ComfyUI 出图，可能要几分钟）';
+  $('outimg').style.display = 'none';
+  try {
+    const r = await fetch('/api/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ task, mode, image: imgB64 || '', thinking: $('think').value })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      $('outmsg').innerHTML = `<b>完成</b> · ${j.mode}<br><span style="color:#8b93a3">${j.image}</span><br><br><b>Qwen3.8 写的提示词：</b><br>${j.prompt}`;
+      const img = $('outimg');
+      img.src = '/api/image?t=' + Date.now();
+      img.style.display = 'block';
+    } else {
+      $('outmsg').innerHTML = `<span style="color:#f85149">失败：</span>${j.error}`;
+    }
+  } catch (e) {
+    $('outmsg').innerHTML = `<span style="color:#f85149">请求出错：</span>${e.message}`;
+  } finally { $('go').disabled = false; }
+};
+</script>
+</body>
+</html>

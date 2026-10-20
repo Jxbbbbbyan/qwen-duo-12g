@@ -1,0 +1,81 @@
+# ─── 模型权重：体积 30 GiB+，且受各自上游许可约束 ───────────────────────────
+# Model weights: 30 GiB+, and governed by their own upstream licences.
+*.gguf
+*.safetensors
+*.sft
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# ─── 归档包与安装程序：不发布第三方二进制 ───────────────────────────────────
+# Archives and installers: do not publish third-party binaries.
+*.7z
+*.zip
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.exe
+*.msi
+*.whl
+
+# ─── 日志与运行时产物 ───────────────────────────────────────────────────────
+logs/
+*.log
+*.log.err
+_output/
+output/
+temp/
+tmp/
+
+# ─── 凭据与环境文件：绝不入库 ───────────────────────────────────────────────
+# Credentials and environment files: never commit.
+.env
+.env.*
+!.env.example
+*.env
+credentials*
+*credential*
+secrets*
+*.key
+*.pem
+*.pfx
+*.p12
+*.keystore
+.netrc
+_netrc
+.npmrc
+.nuget/
+id_rsa*
+id_ed25519*
+*_token*
+*cookie*
+
+# ─── 工具与依赖 ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+node_modules/
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# ─── 本仓库脚本运行时生成的本地状态 ─────────────────────────────────────────
+# Local state written by this repo's own scripts.
+pagefile-backup.json
+qwen-fw-test.txt
+
+# ─── Windows / macOS ────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ─── 本仓库脚本运行时会生成的本地目录（不应入库） ───────────────────────────
+# Local directories produced when this repo's scripts run - never commit these.
+_evidence/
+ComfyUI_windows_portable/
+uploaded/
+reference-images/
+*.manifest.jsonpagefile-backup-*.json

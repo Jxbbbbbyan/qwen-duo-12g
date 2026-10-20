@@ -1,0 +1,35 @@
+# 统一行尾，避免 Windows/Linux 之间的整文件 diff 抖动
+# Normalise line endings so platform differences don't churn whole files.
+* text=auto eol=lf
+
+# Windows 批处理与命令入口必须保持 CRLF，否则 cmd.exe 解析异常
+# Windows batch entry points must stay CRLF or cmd.exe mis-parses them.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# PowerShell 统一 LF
+*.ps1   text eol=lf
+*.psm1  text eol=lf
+
+# 源码与文档
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# 二进制：不做任何转换，也不参与文本 diff
+# Binaries: never convert, never text-diff.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+*.gguf  binary
+*.safetensors binary
+*.zip   binary
+*.7z    binary
+*.exe   binary
+*.dll   binary
