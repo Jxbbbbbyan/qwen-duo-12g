@@ -45,7 +45,7 @@ All numbers in the README trace back to a measurement listed here.
 
 模型元数据（读取自 GGUF header）：
 
-```
+```text
 general.architecture      = qwen35
 block_count               = 65
 full_attention_interval   = 4        → 约 16 层全注意力，其余为 SSM/线性层
@@ -141,7 +141,7 @@ nextn_predict_layers      = 1
 
 ## 4. KV cache 量化
 
-```
+```text
 -ctk q4_0 -ctv q4_0 -fa on
 ```
 
@@ -179,7 +179,7 @@ nextn_predict_layers      = 1
 
 因此总控台的流程是**严格串行**的：
 
-```
+```text
 start llama → 生成提示词 → stop llama → start ComfyUI → 出图 → stop ComfyUI → start llama
 ```
 
