@@ -1,4 +1,4 @@
-# Qwen Duo 12G
+# Qwen Duo 12G — local LLM + image generation on 12GB VRAM
 
 **让 27B 语言模型帮你理解需求、写提示词，再自动切换到图像模型出图。单卡 12 GB 显存 + 16 GB 内存，Windows 本地运行。**
 
@@ -10,6 +10,8 @@
 
 *已有流程样张：输入创作需求 → Qwen3.8-27B 写提示词 → Qwen-Image 2.1 出图。点击查看原图。*
 *Existing pipeline output: creative brief → Qwen3.8-27B prompt → Qwen-Image 2.1 render. Click for the original.*
+
+技术路线 / Technical route: **Qwen3.8-27B GGUF → llama.cpp → automatic model switching → ComfyUI / Qwen-Image 2.1**. Low-VRAM local inference uses **serial execution, CPU/GPU layer offloading, memory-mapped weights (mmap), and quantized KV cache**; the models do not run concurrently. 小显存本地推理采用串行调度、CPU/GPU 分层卸载、内存映射和 KV 缓存量化。
 
 ## 适合谁 / Who this is for
 
@@ -23,6 +25,18 @@ For creators and local-AI enthusiasts comfortable configuring models, and develo
 | 每张图都要写英文提示词、复制粘贴、手动切换 / Manual prompts, copying and switching | 一次提交需求，自动写提示词、切换、出图并保存到桌面 / One request drives prompt authoring, switching and saving the image |
 | 想按参考图改图 / Want to work from a reference | 图片同时用于 LLM 理解和图像模型条件生成 / The reference reaches both the vision-capable LLM and image conditioning |
 | 显存之外，16 GB 内存也吃紧 / RAM is constrained too | 提供按层卸载、可回收 mmap 页、量化 KV 的配置与账本 / Documented layer offload, reclaimable mmap pages and quantised KV configuration |
+
+## 需求与技术路线 / Use cases and technical routes
+
+| 你可能在找 / You may be looking for | 对应术语 / Technical terms | 适用范围 / Fit |
+|---|---|---|
+| 12GB 显卡、16GB 内存，本地跑大模型和生图 / Local LLM and image generation on 12GB VRAM, 16GB RAM | low VRAM; local AI; GGUF; CPU/GPU offloading | 针对已有参考机配置的串行流程；性能不保证跨机器通用 / Serial workflow for the recorded configuration, not a universal performance guarantee |
+| 让大模型写提示词，再交给 ComfyUI / LLM prompt generation for ComfyUI | llama.cpp; ComfyUI; automatic model switching; prompt-to-image | 总控台生成提示词、停止 LLM、启动图像后端，再回装 / Console sequences prompt generation, shutdown, rendering and reload |
+| 上传参考图，换风格或重绘 / Reference-image editing and image-to-image generation | Qwen-Image; image editing; reference conditioning | 参考图进入视觉模型和图像条件编码器；不保证像素或身份保真 / Reference reaches both models; no pixel or identity preservation guarantee |
+| 部署后离线生成图片 / Offline text-to-image on Windows | offline AI; local inference; Windows; text-to-image | 权重和运行时首次下载需联网，部署后本地推理 / Initial downloads require network; inference is local after setup |
+| 内存不够，想查 GGUF 卸载和 mmap 配置 / Memory-constrained GGUF deployment | model offloading; mmap; quantized KV cache; out-of-memory | 可查看卸载账本与 OOM 记录；不是通用内存优化库 / Offload and OOM evidence, not a general memory-optimisation library |
+
+[按需求核对能力、证据和限制 / Use-case evidence and limits](docs/USE_CASES.md)
 
 ## 特色在哪里 / What makes it useful
 
