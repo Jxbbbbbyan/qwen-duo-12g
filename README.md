@@ -11,7 +11,25 @@
 *已有流程样张：输入创作需求 → Qwen3.8-27B 写提示词 → Qwen-Image 2.1 出图。点击查看原图。*
 *Existing pipeline output: creative brief → Qwen3.8-27B prompt → Qwen-Image 2.1 render. Click for the original.*
 
-技术路线 / Technical route: **Qwen3.8-27B GGUF → llama.cpp → automatic model switching → ComfyUI / Qwen-Image 2.1**. Low-VRAM local inference uses **serial execution, CPU/GPU layer offloading, memory-mapped weights (mmap), and quantized KV cache**; the models do not run concurrently. 小显存本地推理采用串行调度、CPU/GPU 分层卸载、内存映射和 KV 缓存量化。
+## 技术路线与确切模型 / Technical route and exact models
+
+**语言模型：Unsloth 发布的 Qwen3.8-27B UD-Q4_K_S GGUF**（基座记录为 `Qwen/Qwen3.8-27B`，量化仓库 `unsloth/Qwen3.8-27B-GGUF`）；**图像模型：Comfy-Org/Qwen-Image-2.1，Turbo INT8 convrot DiT + Qwen3-VL-8B INT8 convrot 文本编码器 + BF16 VAE**。下面列出实际使用的全部五个文件，而不只写模型系列名。
+
+**Exact stack:** the Unsloth Qwen3.8-27B UD-Q4_K_S GGUF and its F16 vision projector feed llama.cpp; ComfyUI runs the Qwen-Image 2.1 Turbo INT8 convrot DiT, Qwen3-VL-8B INT8 convrot text encoder and BF16 VAE. These names identify the artifacts recorded in the repository manifest, not an arbitrary compatible substitute.
+
+| 角色 / Role | 确切模型或组件 / Exact model or component | 文件名 / Artifact |
+|---|---|---|
+| 语言模型 / LLM | Qwen3.8-27B，Unsloth UD-Q4_K_S GGUF | `Qwen3.8-27B-UD-Q4_K_S.gguf` |
+| 配套视觉投影器 / Vision projector | Qwen3.8-27B F16 mmproj，`qwen3vl_merger`，CPU 运行 | `mmproj-F16.gguf` |
+| 图像扩散主体 / Image DiT | Qwen-Image 2.1 **Turbo INT8 convrot** | `qwen_image_2.1_turbo_int8_convrot.safetensors` |
+| 图像侧文本编码器 / Image text encoder | **Qwen3-VL-8B INT8 convrot** | `qwen3vl_8b_int8_convrot.safetensors` |
+| 图像解码器 / Image VAE | Qwen-Image 2.1 **BF16 VAE** | `qwen_image_2.1_vae_bf16.safetensors` |
+
+模型来源、GGUF 元数据、字节数和完整 SHA-256 见[模型身份清单](docs/MODELS.md)。名称和文件名必须与哈希一起核对；更换量化档位或模型后需要重新测量。27B 语言模型不能替代图像侧的 8B 文本编码器；可选的非 Turbo DiT 不属于这里的默认实测集合。
+
+Verify names **and hashes** against the [manifest](docs/MODELS.md). A different quantisation or model requires new measurements. The 27B LLM is not interchangeable with the image stack's 8B text encoder; the optional non-Turbo DiT is outside this default stack.
+
+**执行顺序 / Execution:** Qwen3.8-27B UD-Q4_K_S + F16 mmproj → llama.cpp 理解需求、生成提示词 → 终止 LLM、释放显存 → ComfyUI / Qwen-Image 2.1 Turbo INT8 convrot（8B 编码器 + BF16 VAE）出图 → 终止 ComfyUI、回装 LLM。Low-VRAM local inference uses **serial execution, CPU/GPU layer offloading, memory-mapped weights (mmap), and quantized KV cache**; the models do not run concurrently.
 
 ## 适合谁 / Who this is for
 
@@ -72,6 +90,65 @@ These are existing reference-machine records, not new benchmarks or guarantees f
 | 1080p 出图段 / Render stage | 1920×1088，约 / about **88 s**，不含切换 / excludes switching |
 | 2K 出图段 / Render stage | 2560×1440，约 / about **4.5 min**，不含切换 / excludes switching |
 | 一次带参考图的完整流程 / One reference-image run | **6 min 41 s**，包含最终回装 LLM；图片在 **5 min 24 s** 时生成 / includes final LLM reload; image written at 5 min 24 s — [时间线 / timeline](docs/RUN_LOG.md) |
+
+### 测试条件与参数 / Test conditions and parameters
+
+历史运行环境记录：**Windows 11 build 26200、驱动 616.92、llama.cpp 0.6.0-dev / build 11617 / commit `14310190c`、ComfyUI 0.41.0、PyTorch 2.14.0+cu130、嵌入式 Python 3.13.14**。硬件和完整版本表见[模型与环境清单](docs/MODELS.md)。SSD 上的热态结果不能与 HDD 冷加载直接比较。
+
+| 侧 / Component | 需要记录并保持一致的参数 / Configuration to record |
+|---|---|
+| llama.cpp | `-ngl 44 -c 65536 -np 1 -ctk q4_0 -ctv q4_0 -fa on -ub 256 -lm mmap`；`LLAMA_ARG_MMPROJ_OFFLOAD=0`；不使用 `-ncffn` 或 `mlock` |
+| 提示词生成 / Prompt generation | 默认 `QWEN_THINKING=off`；`max_tokens=2000`、`temperature=0.7`；切换思考档位需要重启 LLM |
+| ComfyUI | `--fast-disk --disable-pinned-memory --windows-standalone-build` |
+| 默认图像采样 / Image sampling | Turbo，8 steps，Euler，simple scheduler，CFG 1.0，denoise 1.0；每次 seed 由当前时间生成，必须从日志记录 |
+| 输出 / Output | 无参考图：1080p = 1920×1088，2K = 2560×1440；有参考图：按参考图长宽比生成，不能仅凭模式名认定尺寸 |
+
+**64,000 与 65,536 分开记录：** 上表实测显存/内存对应的上下文测量点是 **64,000**；仓库当前启动器默认是 **65,536**。运行默认值不能当作精确复现了 64,000 的那一行。出图总控台的 context/ngl 在源码中固定，`QWEN_CTX`/`QWEN_NGL` 只覆盖纯对话入口，详见[路径与参数边界](TECHNICAL_GUIDE.md#快速开始--quick-start)。
+
+The recorded memory row uses **64,000**, while the shipped launcher uses **65,536**. Record the actual configuration; do not label a default run as an exact repeat of the memory measurement. Runtime settings above are inspectable in the [orchestrator](orchestrator/orchestrator.mjs) and [workflow template](comfyui/scripts/stage0_scaffold_api.json).
+
+### 完整测试步骤 / Reproduction procedure
+
+下面是针对当前仓库的复现步骤，**不是声称历史所有样本都按这一完整协议测过**。历史吞吐及出图汇总没有完整记录每次输入、seed、重复次数或方差，因此是参考观测值，不是统计基准。
+
+This is a procedure for new reproduction runs. Historical summaries do not preserve every input, seed, repeat count or variance; they are reference observations, not a statistical benchmark.
+
+1. **完成部署并固定测试条件。** 按[完整安装映射](TECHNICAL_GUIDE.md#快速开始--quick-start)获取上述五份权重及运行时，核对路径、工作目录、版本、页面文件和磁盘空间。记录 GPU 实际显存、RAM、驱动、SSD/HDD、后台负载及冷/热态；测试时一次只使用一个总控台，避免共享后端被另一入口停止。
+2. **逐文件核对身份。** 对五个实际运行文件执行下面的 PowerShell 命令，把长度和完整 SHA-256 与 [MODELS.md](docs/MODELS.md) 逐项比较。变量 `$modelPath` 是你已部署文件的实际绝对路径，依次替换为五个文件；不能只核对文件名。
+
+~~~powershell
+# Repeat for each of the five deployed model artifacts, using its actual path.
+$modelPath = 'C:\llm\models\Qwen3.8-27B\Qwen3.8-27B-UD-Q4_K_S.gguf'
+Get-Item -LiteralPath $modelPath | Select-Object Name, Length
+Get-FileHash -LiteralPath $modelPath -Algorithm SHA256
+~~~
+
+3. **启动资源采样，再启动 UI。** 在独立终端运行下面的 GPU 采样命令，每秒记录总显存占用和 GPU 利用率，测试后用 Ctrl+C 停止。另用任务管理器记录系统物理内存基线、LLM 阶段和图像阶段的读数；记录采样时间。设备总显存包含桌面与其他进程，不等于模型张量字节数；低频采样也不保证捕获瞬时峰值。
+
+~~~powershell
+# Separate terminal; keep the resulting file outside the repository.
+nvidia-smi --query-gpu=timestamp,name,memory.total,memory.used,utilization.gpu --format=csv -l 1 > "$env:TEMP\qwen-gpu-samples.csv"
+~~~
+
+~~~powershell
+# Repository root, after deployment/path checks. Use the UI for the timed run.
+$env:QWEN_THINKING = 'off'
+node .\orchestrator\orchestrator.mjs
+# Open http://127.0.0.1:8090 and wait until the LLM is ready.
+~~~
+
+4. **逐项测试，保存确切输入。** 先做无参考图的 1080p 文生图，例如“橘猫坐在窗台上晒太阳，水彩风格”；再以相同需求测试 2K；最后上传一张本地图并给出明确修改指令，测试参考图链路。逐项记录提示原文、思考档位、原始参考图 SHA-256、模式、实际输出尺寸、生成的英文提示词、图像 seed 和结果文件。示例需求只是新测试输入，不冒充历史 88 秒或 4.5 分钟样本的原始输入。测试前后核对 UI 所选思考档位；不把 `--mode` 当作参考图输出尺寸保证。
+5. **按阶段读日志与计时。** 用 UI 提交后，取 `logs/orchestrator.log` 中的“流程开始”为起点、“出图完成”为图片可用终点、“Qwen3.8 就绪 / 流程结束”为回装完成终点。分别统计提示词生成、LLM 停止、ComfyUI 启动/就绪、出图、ComfyUI 停止和 LLM 回装；启动 UI 前的冷启动另记，不混进既有时间线。总控台日志时间为 UTC；后端日志按各自格式记录，跨日期时保留日期与外部计时记录。日志目录默认 `C:\ComfyUI\logs`，或 `QWEN_COMFY_ROOT` 下的 `logs`；还需保存 `orchestrator-llama.log`、`orchestrator-comfy.log` 和 `last_prompt.txt`。
+6. **单独计算各项结果。** 从 llama.cpp 的生成阶段 timing（排除 prompt evaluation）报告 tok/s，并保留原日志；只有在明确生成 token 数和生成耗时时才自行相除。RAM 记录系统物理内存百分比，显存区分设备总占用与 llama.cpp 自报缓冲。不要用 GGUF 文件体积、进程提交内存或 mmap 映射大小代替物理 RAM。检查输出图能打开、尺寸正确，模型切换和最终回装确实完成；失败、超时和 OOM 也必须记录。
+7. **重复并报告范围。** 若要形成自己的基准，建议每种模式重复至少 3 次，保留冷启动样本和后续热态样本，分别报告原始结果、中位数和范围，并写清样本量。由于 LLM 采样与时间 seed，重复不保证同图；当前 CLI 没有固定 seed 参数。发布前移除私人路径、提示词和参考图。上述次数是建议方案，不能写成仓库历史已经完成的重复次数。
+
+**计时示例只对应已有那一次带参考图运行：** 提示词 217 s → 停 LLM 5 s → ComfyUI 就绪 22 s → 出图 80 s → 停 ComfyUI 6 s → 回装 71 s，合计 **401 s**；到图片生成是 **324 s**。这一轮的图像段 **80 s** 与汇总表约 **88 s** 是不同观测，不应强行合并；原始输入和思考设置不足以从公开摘录完整还原该轮。参见[带时间戳的日志摘录](docs/RUN_LOG.md)。
+
+**复现报告至少包含 / Minimum report:** commit、五份模型哈希、硬件/运行时版本、实际参数、冷/热态、任务与参考图标识、seed、输出尺寸、各阶段耗时、tok/s 来源、GPU/RAM 采样及失败信息。For each new run, retain enough evidence to separate prompt generation, rendering, switching and final reload. The historical 401 s run is a single observation, not a promise for new inputs.
+
+### 可选离线验证 / Optional offline check
+
+仓库还提供[按程序阻断出站的验证步骤](docs/EVIDENCE.md#7-离线验证方法)：核对实际推理程序路径 → 用 `tools/fw-on.ps1` 添加并回读规则 → 完整运行提示词生成和出图 → 用 `tools/fw-off.ps1` 清理并确认删除，失败时也须清理。两个脚本需要管理员权限。此方法只覆盖指定的推理进程，Node.js 不在默认阻断范围内；它不是全机断网测试，也没有附日期化的历史验证结果。
 
 **部署前须知 / Before setup:** 严格串行；内存余量很小；首次部署要下载约 31.3 GiB 权重，建议准备 100 GiB 以上可用磁盘空间（含页面文件及安装余量）。参考图不保证主体细节保真；64K 配置不等于满上下文压力测试。当前仍有参考机绝对路径需要核对，并非克隆后即可运行的一键安装包。
 
