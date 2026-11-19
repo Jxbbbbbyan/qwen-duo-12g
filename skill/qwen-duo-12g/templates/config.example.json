@@ -1,0 +1,23 @@
+{
+  "schema": "qwen-duo-12g.config/v1",
+  "projectRoot": "",
+  "llamaExe": "",
+  "model": "",
+  "mmproj": "",
+  "python": "",
+  "comfyMain": "",
+  "comfyCwd": "",
+  "graph": "",
+  "comfyOutput": "",
+  "imageDit": "",
+  "imageEncoder": "",
+  "imageVae": "",
+  "thinking": "off",
+  "mode": "1080p",
+  "llamaPort": 8080,
+  "comfyPort": 8188,
+  "uiPort": 8090,
+  "allowDownloads": false,
+  "allowSystemChanges": false,
+  "expectedBytes": {}
+}

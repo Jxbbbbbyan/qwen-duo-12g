@@ -1,0 +1,16 @@
+# Traceability
+
+`program-check` is executed by Node in this repository. `manual` is an instruction to a person or to the agent. `blocked` means the packaged script stops. `hardware-dependent` means a real GPU run, which is not executed here. There is no mocked GPU. The sibling-isolation check is a program-check, not a mock of llama.cpp.
+
+| id | verification | command | module | inputs | output | errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| blocker | manual | read references/DESIGN-SPLIT.md | references/DESIGN-SPLIT.md | the published loader and packaging rules | operator sees the unresolved GPU, process, and workspace gaps | do not claim approval or upload |
+| local-program | manual, blocked, hardware-dependent | operator runs node checkout/orchestrator/orchestrator.mjs --run task | orchestrator/orchestrator.mjs CLI | checkout, weights, Windows GPU, user task | one local process runs startLlama, writePrompt, stopLlama, startComfy, uploadImage, render, deliverImage, stopComfy, then stopLlama or startLlama | packaged scripts must not launch it; not run in these tests |
+| preflight | program-check | node scripts/01-preflight.mjs | scripts/01-preflight.mjs | no config | JSON report, exit 0, stopPipeline true, checksMayContinue true | exit 2 on extra arguments; does not probe a GPU |
+| validate-config | program-check | node scripts/02-validate-config.mjs --config ABS | scripts/02-validate-config.mjs | absolute user config; optional small input JSON | structurallyValid true, exit 0, or exit 3 or 4 | sensitive fields are refused and not printed |
+| dependencies | program-check | node scripts/03-dependencies.mjs --config ABS | scripts/03-dependencies.mjs | absolute config; optional workspace and confirm-write; optional input JSON | exit 5, dependencyOk and workspaceVerified reported separately | missing paths, bad graph, busy port, unverified workspace; no process is stopped |
+| prompt-model | program-check, blocked, hardware-dependent | do not run while stopPipeline; script is scripts/04-prompt-model.mjs | orchestrator/orchestrator.mjs startLlama writePrompt | small input JSON | exit 5, spawned false | does not call the local symbols |
+| gpu-handoff | program-check, blocked, hardware-dependent | do not run while stopPipeline; script is scripts/05-gpu-handoff.mjs | orchestrator/orchestrator.mjs stopLlama | small input JSON | exit 5, no process signal | local confirmation is the health endpoint inside the local process, not a VRAM reading |
+| image-stage | program-check, blocked, hardware-dependent | do not run while stopPipeline; script is scripts/06-image-stage.mjs | orchestrator/orchestrator.mjs startComfy uploadImage render | small input JSON, no image bytes | exit 5 | does not start ComfyUI |
+| outputs | program-check, blocked, hardware-dependent | do not run while stopPipeline; script is scripts/07-outputs.mjs | orchestrator/orchestrator.mjs deliverImage | small input JSON | exit 5, no image bytes | a render cannot be carried through chat JSON |
+| cleanup | program-check, blocked, hardware-dependent | do not run while stopPipeline; script is scripts/08-cleanup.mjs | orchestrator/orchestrator.mjs stopComfy stopLlama | small input JSON | exit 5, no deletion | local QWEN_RELEASE_ON_EXIT=1 stops only that process's children; historical path reloads llama |
