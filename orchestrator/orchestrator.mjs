@@ -44,7 +44,14 @@ const LLAMA_EXE = process.env.QWEN_LLAMA_EXE || 'D:/llm/bin/llama.cpp/llama-serv
 const PY     = process.env.QWEN_PY || `${ROOT}/ComfyUI_windows_portable/python_embeded/python.exe`;
 const MAIN   = process.env.QWEN_COMFY_MAIN || `${ROOT}/ComfyUI_windows_portable/ComfyUI/main.py`;
 const GRAPH  = process.env.QWEN_GRAPH || `${ROOT}/scripts/stage0_scaffold_api.json`;
-const DESKTOP = path.join(process.env.USERPROFILE || os.homedir(), 'Desktop');
+// 结果目录：默认仍是桌面。本地直接运行时可设置 QWEN_RESULT_DIR，把图片留在指定目录。
+// Result directory stays the desktop unless a local run sets QWEN_RESULT_DIR.
+// Marketplace scripts do not set this and do not launch this file.
+const RESULT_DIR = process.env.QWEN_RESULT_DIR || path.join(process.env.USERPROFILE || os.homedir(), 'Desktop');
+// ComfyUI 的工作目录。未设置时保持参考机上的原路径。市场脚本不会代为启动本文件。
+// Working directory for ComfyUI. Unset keeps the reference-machine path.
+// Marketplace scripts do not launch this file.
+const COMFY_CWD = process.env.QWEN_COMFY_CWD || 'C:/ComfyUI/ComfyUI_windows_portable';
 
 const IDLE_MS = Number(process.env.ORCH_IDLE_MS || 60000);   // 浏览器无心跳多久后退出
 const FIRST_CONNECT_MS = Number(process.env.ORCH_FIRST_CONNECT_MS || 600000); // 首次连接宽限
@@ -155,7 +162,7 @@ async function startComfy() {
   log('启动 ComfyUI / Qwen-Image 2.1…');
   const fd = logFd('orchestrator-comfy.log');
   comfyProc = spawn(PY, ['-s', MAIN, '--fast-disk', '--disable-pinned-memory', '--windows-standalone-build'], {
-    cwd: 'C:/ComfyUI/ComfyUI_windows_portable',
+    cwd: COMFY_CWD,
     stdio: ['ignore', fd, fd],
     windowsHide: true,
     env: { ...process.env, CUDA_VISIBLE_DEVICES: '0' }
@@ -320,6 +327,15 @@ async function render(prompt, mode, imageName) {
   throw new Error('出图超时（20 分钟）');
 }
 
+function deliverImage(task, mode, file) {
+  const src = path.join(OUT_DIR, file);
+  const safe = String(task).replace(/[\\/:*?"<>|\r\n]/g, '').slice(0, 40) || 'image';
+  fs.mkdirSync(RESULT_DIR, { recursive: true });
+  const dst = path.join(RESULT_DIR, `${safe}_${mode}.png`);
+  fs.copyFileSync(src, dst);
+  return dst;
+}
+
 // ------------------------------------------------------------------ 完整流程
 let queue = Promise.resolve();
 
@@ -347,10 +363,7 @@ function runFlow(task, mode, imageB64) {
 
       const refName = imageB64 ? await uploadImage(imageB64) : null;
       const file = await render(prompt, mode, refName);
-      const src = path.join(OUT_DIR, file);
-      const safe = String(task).replace(/[\\/:*?"<>|\r\n]/g, '').slice(0, 40) || 'image';
-      const dst = path.join(DESKTOP, `${safe}_${mode}.png`);
-      fs.copyFileSync(src, dst);
+      const dst = deliverImage(task, mode, file);
       lastImagePath = dst;
       log('④ 出图完成 -> ' + dst);
 
@@ -508,10 +521,24 @@ if (isCli) {
   // --image <文件路径>：可选参考图。命令行模式下用它做"看图写提示词 + 参考图出图"。
   const iIdx = argv.indexOf('--image');
   let cliImg = null;
-  if (iIdx >= 0 && argv[iIdx + 1] && fs.existsSync(argv[iIdx + 1])) {
-    cliImg = fs.readFileSync(argv[iIdx + 1]).toString('base64');
+  if (!task || task.startsWith('--')) {
+    console.error('用法: node orchestrator.mjs --run "任务描述" [--mode 1080p|2k] [--image 参考图.png]');
+    process.exit(2);
   }
-  if (!task) { console.error('用法: node orchestrator.mjs --run "任务描述" [--mode 1080p|2k] [--image 参考图.png]'); process.exit(2); }
+  if (mode !== '1080p' && mode !== '2k') {
+    console.error('mode 必须是 1080p 或 2k');
+    process.exit(2);
+  }
+  if (iIdx >= 0) {
+    const imagePath = argv[iIdx + 1];
+    let imageStat = null;
+    try { imageStat = imagePath && !imagePath.startsWith('--') ? fs.statSync(imagePath) : null; } catch { imageStat = null; }
+    if (!imagePath || !imageStat || !imageStat.isFile() || imageStat.size > 30 * 1024 * 1024) {
+      console.error('参考图必须是存在的文件且不超过 30MB: ' + (imagePath || ''));
+      process.exit(2);
+    }
+    cliImg = fs.readFileSync(imagePath).toString('base64');
+  }
   (async () => {
     try {
       log('==== CLI 流程开始 ====' + (cliImg ? '（带参考图）' : ''));
@@ -523,19 +550,22 @@ if (isCli) {
       if (!(await startComfy())) throw new Error('ComfyUI 未能启动');
       const refName = cliImg ? await uploadImage(cliImg) : null;
       const file = await render(prompt, mode, refName);
-      const src = path.join(OUT_DIR, file);
-      const safe = String(task).replace(/[\\/:*?"<>|\r\n]/g, '').slice(0, 40) || 'image';
-      const dst = path.join(DESKTOP, `${safe}_${mode}.png`);
-      fs.copyFileSync(src, dst);
+      const dst = deliverImage(task, mode, file);
       lastImagePath = dst;
       log('图片 -> ' + dst);
       await stopComfy();
-      await startLlama();
+      // QWEN_RELEASE_ON_EXIT=1：一次性运行结束后停掉本进程启动的模型，不把 llama 留在后台。
+      // 未设置时保持原行为：重新拉起 llama，然后本进程退出。
+      // When set, stop models this process started. Otherwise keep the old reload-and-exit behaviour.
+      if (process.env.QWEN_RELEASE_ON_EXIT === '1') await stopLlama();
+      else await startLlama();
       log('==== CLI 流程结束 ====');
       console.log(JSON.stringify({ ok: true, image: dst, prompt }));
       process.exit(0);
     } catch (e) {
       log('CLI 失败: ' + e.message);
+      try { await stopComfy(); } catch {}
+      try { await stopLlama(); } catch {}
       console.error(JSON.stringify({ ok: false, error: e.message }));
       process.exit(1);
     }
