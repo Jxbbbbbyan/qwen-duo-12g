@@ -117,8 +117,14 @@ export function checkSkill() {
     if (onDisk !== item.source) errors.push(item.file + ' is not the generated source');
     const size = logicBytes(onDisk);
     if (size == null || size > LOGIC_LIMIT) errors.push(item.file + ' logic is ' + size + ' bytes');
-    if (onDisk.includes('child_process') || onDisk.includes('spawn(') || onDisk.includes('import.meta.url')) {
-      errors.push(item.file + ' is not standalone');
+    if (onDisk.includes('import.meta.url')) errors.push(item.file + ' reads its own path');
+    const rel = 'scripts/' + item.file;
+    const serviceStage = rel === 'scripts/04-prompt-model.mjs' || rel === 'scripts/06-image-stage.mjs' || rel === 'scripts/08-cleanup.mjs';
+    if ((onDisk.includes('child_process') || onDisk.includes('spawn(')) && !serviceStage) errors.push(item.file + ' spawns outside a service stage');
+    if (serviceStage && onDisk.includes('spawn(') && !onDisk.includes('shell: false')) errors.push(item.file + ' spawn must set shell false');
+    if (onDisk.includes("'/IM'") || onDisk.includes('"/IM"')) errors.push(item.file + ' kills by image name');
+    if ((rel === 'scripts/04-prompt-model.mjs' || rel === 'scripts/06-image-stage.mjs') && onDisk.includes('orchestrator.mjs')) {
+      errors.push(item.file + ' references the repository orchestrator');
     }
     const inline = JSON.parse(onDisk.match(/const INLINE = (\{[\s\S]*?\});\n\/\* __INLINE_DATA_END__ \*\//)[1]);
     symbols.push(...inline.symbols);
@@ -208,7 +214,7 @@ export function zipStore(entries) {
 
 export function laStamp(date = new Date()) {
   const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Los_Angeles',
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -218,8 +224,8 @@ export function laStamp(date = new Date()) {
   });
   const parts = Object.fromEntries(fmt.formatToParts(date).map((part) => [part.type, part.value]));
   return {
-    file: parts.year + parts.month + parts.day + '-' + parts.hour + parts.minute + '-America-Los_Angeles',
-    text: parts.year + '-' + parts.month + '-' + parts.day + 'T' + parts.hour + ':' + parts.minute + ' America/Los_Angeles',
+    file: parts.year + parts.month + parts.day + '-' + parts.hour + parts.minute + '-Asia-Shanghai',
+    text: parts.year + '-' + parts.month + '-' + parts.day + 'T' + parts.hour + ':' + parts.minute + ' Asia/Shanghai',
   };
 }
 
@@ -235,14 +241,15 @@ export function packSkill(outDir) {
   const zipPath = path.join(outDir, zipName);
   fs.writeFileSync(zipPath, zip);
   const manifest = {
-    timezone: 'America/Los_Angeles',
+    timezone: 'Asia/Shanghai',
     generatedAt: stamp.text,
     zip: zipName,
     zipSha256: crypto.createHash('sha256').update(zip).digest('hex'),
     zipBytes: zip.length,
     fileCount: entries.length,
     marketplaceApproved: false,
-    pipelineBlocked: true,
+    liveHardwareVerified: false,
+    implementationPresent: true,
     files: entries.map((entry) => ({
       name: entry.name,
       bytes: entry.data.length,

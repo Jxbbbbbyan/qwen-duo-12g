@@ -1,25 +1,20 @@
 #!/usr/bin/env node
-// Self-contained stage script. Do not import skill-package files.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import net from 'node:net';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
 
 /* __INLINE_DATA_START__ */
-const INLINE = {"stage":"image-stage","kind":"blocked","expects":"gpu-handoff","symbols":["startComfy","uploadImage","render"],"example":{"schema":"qwen-duo-12g.config/v1","projectRoot":"","llamaExe":"","model":"","mmproj":"","python":"","comfyMain":"","comfyCwd":"","graph":"","comfyOutput":"","imageDit":"","imageEncoder":"","imageVae":"","thinking":"off","mode":"1080p","llamaPort":8080,"comfyPort":8188,"uiPort":8090,"allowDownloads":false,"allowSystemChanges":false,"expectedBytes":{}},"blocker":"Windows GPU, llama.cpp, ComfyUI, process lifetime, and a shared workspace are not established for an Agensi buyer session. This script does not start them.","usage":["qwen-duo-12g stage: image-stage","Run this file alone. It does not read or launch other skill-package files.","stdout JSON is a candidate handoff, not a documented Agensi runtime API.","Do not put secrets in arguments or stdout. This script does not download, install, or edit the system.","Usage: node <this-file> --input-json <small-json>","This stage always stops. It does not start the local program.","Exit codes: 0 check finished, 2 usage, 3 missing input, 4 invalid input, 5 blocked."]};
+const INLINE = {"stage":"image-stage","kind":"image","expects":"gpu-handoff","symbols":["startComfy","uploadImage","render"],"example":{"schema":"qwen-duo-12g.config/v1","projectRoot":"","llamaExe":"","model":"","mmproj":"","python":"","comfyMain":"","comfyCwd":"","graph":"","comfyOutput":"","imageDit":"","imageEncoder":"","imageVae":"","thinking":"off","mode":"1080p","llamaPort":8080,"comfyPort":8188,"uiPort":8090,"allowDownloads":false,"allowSystemChanges":false,"expectedBytes":{}},"usage":["qwen-duo-12g stage: image-stage","Run this file alone. It does not read other skill-package files or launch the repository orchestrator.","stdout JSON is a candidate handoff, not a documented Agensi runtime API.","liveHardwareVerified is always false in this script. A controlled fixture is not a real model result.","Do not put secrets in arguments or stdout. This script does not download, install, or edit the system.","Usage: node <this-file> --config <absolute-file> --artifact-dir <absolute-dir> --confirm-write --input-json <small-json> [--image <file>] [--service-timeout-ms N]","Exit codes: 0 stage finished, 2 usage, 3 missing input, 4 invalid input, 5 blocked or service failed."]};
 /* __INLINE_DATA_END__ */
 
 const EXIT = { OK: 0, USAGE: 2, MISSING: 3, INVALID: 4, BLOCKED: 5 };
-const REQUIRED = ['projectRoot', 'llamaExe', 'model', 'mmproj', 'python', 'comfyMain', 'comfyCwd', 'graph', 'comfyOutput'];
-const FILES = new Set(['llamaExe', 'model', 'mmproj', 'python', 'comfyMain', 'graph', 'imageDit', 'imageEncoder', 'imageVae']);
-const DIRS = new Set(['projectRoot', 'comfyCwd', 'comfyOutput']);
-const OPTIONAL = ['imageDit', 'imageEncoder', 'imageVae'];
-const THINKING = new Set(['off', 'low', 'medium', 'high', 'xhigh']);
-const MODES = new Set(['1080p', '2k']);
 const SECRET_KEY = /password|secret|token|credential|api[-_]?key/i;
 const SECRET_VALUE = /^(sk-|ghp_|github_pat_|AKIA|xox[baprs]-)/;
 const INPUT_MAX = 16 * 1024;
 const CONFIG_MAX = 256 * 1024;
-const GRAPH_MAX = 2 * 1024 * 1024;
-const DISK_NOTE = 100 * 1024 * 1024 * 1024;
 
 function base(extra) {
   return Object.assign({
@@ -27,25 +22,16 @@ function base(extra) {
     kind: INLINE.kind,
     symbols: INLINE.symbols,
     marketplaceApproved: false,
-    pipelineBlocked: true,
-    stopPipeline: true,
     protocol: 'candidate-stdout-json-v1',
     protocolGuaranteedByAgensi: false,
-    spawned: false,
+    liveHardwareVerified: false,
+    implementationPresent: true,
     executedLocalProgram: false,
-    submissionBlocker: INLINE.blocker,
+    realModelOutput: false,
   }, extra);
 }
-
-function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
-}
-
-function finish(obj) {
-  emit(obj);
-  return obj.exitCode;
-}
-
+function emit(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
+function finish(obj) { emit(obj); return obj.exitCode; }
 function parseArgs(argv) {
   const out = { flags: {}, options: {}, error: '' };
   for (let i = 0; i < argv.length; i += 1) {
@@ -56,24 +42,14 @@ function parseArgs(argv) {
     else if (token.startsWith('--')) {
       const key = token.slice(2);
       const value = argv[i + 1];
-      if (!key || value === undefined || value.startsWith('--')) {
-        out.error = 'missing value for --' + key;
-        return out;
-      }
-      if (Object.hasOwn(out.options, key)) {
-        out.error = 'duplicate --' + key;
-        return out;
-      }
+      if (!key || value === undefined || value.startsWith('--')) { out.error = 'missing value for --' + key; return out; }
+      if (Object.hasOwn(out.options, key)) { out.error = 'duplicate --' + key; return out; }
       out.options[key] = value;
       i += 1;
-    } else {
-      out.error = 'unexpected argument';
-      return out;
-    }
+    } else { out.error = 'unexpected argument'; return out; }
   }
   return out;
 }
-
 function findSecret(value, where) {
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i += 1) {
@@ -93,18 +69,16 @@ function findSecret(value, where) {
   if (typeof value === 'string' && SECRET_VALUE.test(value)) return where;
   return '';
 }
-
 function summarize(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
-  for (const key of ['stage', 'exitCode', 'pipelineBlocked', 'stopPipeline', 'workspaceVerified', 'reportComplete', 'dependencyOk', 'checksMayContinue', 'ok']) {
+  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'checksMayContinue', 'stopPipeline']) {
     const value = obj[key];
     if (typeof value === 'boolean' || typeof value === 'number') out[key] = value;
-    else if (typeof value === 'string' && value.length <= 80 && !SECRET_VALUE.test(value)) out[key] = value;
+    else if (typeof value === 'string' && value.length <= 256 && !SECRET_VALUE.test(value)) out[key] = value;
   }
   return out;
 }
-
 function loadInput(raw) {
   if (raw == null) return { ok: true, value: null };
   if (Buffer.byteLength(raw) > INPUT_MAX) return { ok: false, exitCode: EXIT.INVALID, error: 'input JSON is larger than 16KB' };
@@ -115,14 +89,28 @@ function loadInput(raw) {
   if (secret) return { ok: false, exitCode: EXIT.INVALID, error: 'refusing sensitive input at ' + secret };
   return { ok: true, value, summary: summarize(value) };
 }
+function timeoutMs(raw) {
+  if (raw == null) return 30000;
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  if (value < 200 || value > 300000) return null;
+  return value;
+}
 
+
+const REQUIRED = ['projectRoot', 'llamaExe', 'model', 'mmproj', 'python', 'comfyMain', 'comfyCwd', 'graph', 'comfyOutput'];
+const FILE_KEYS = new Set(['llamaExe', 'model', 'mmproj', 'python', 'comfyMain', 'graph', 'imageDit', 'imageEncoder', 'imageVae']);
+const DIR_KEYS = new Set(['projectRoot', 'comfyCwd', 'comfyOutput']);
+const OPTIONAL = ['imageDit', 'imageEncoder', 'imageVae'];
+const THINKING = new Set(['off', 'low', 'medium', 'high', 'xhigh']);
+const MODES = new Set(['1080p', '2k']);
+const GRAPH_MAX = 2 * 1024 * 1024;
 function loadConfig(file) {
   if (!file) return { ok: false, exitCode: EXIT.MISSING, error: 'pass --config <absolute-file>' };
   if (!path.isAbsolute(file)) return { ok: false, exitCode: EXIT.INVALID, error: 'config path must be absolute' };
   let stat;
   try { stat = fs.statSync(file); } catch { return { ok: false, exitCode: EXIT.MISSING, error: 'config file not found' }; }
-  if (!stat.isFile()) return { ok: false, exitCode: EXIT.INVALID, error: 'config path is not a file' };
-  if (stat.size > CONFIG_MAX) return { ok: false, exitCode: EXIT.INVALID, error: 'config file is larger than 256KB' };
+  if (!stat.isFile() || stat.size > CONFIG_MAX) return { ok: false, exitCode: EXIT.INVALID, error: 'config must be a file under 256KB' };
   let parsed;
   try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { ok: false, exitCode: EXIT.INVALID, error: 'config is not valid JSON' }; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, exitCode: EXIT.INVALID, error: 'config must be a JSON object' };
@@ -130,147 +118,209 @@ function loadConfig(file) {
   if (secret) return { ok: false, exitCode: EXIT.INVALID, error: 'refusing sensitive config field at ' + secret };
   return { ok: true, config: parsed };
 }
-
 function structuralErrors(cfg) {
   const errors = [];
   const allowed = new Set(Object.keys(INLINE.example));
   for (const key of Object.keys(cfg)) if (!allowed.has(key)) errors.push('unknown key: ' + key);
-  if (cfg.schema !== INLINE.example.schema) errors.push('schema must be ' + INLINE.example.schema);
+  if (cfg.schema !== INLINE.example.schema) errors.push('schema mismatch');
   for (const key of REQUIRED.concat(OPTIONAL)) {
     if (typeof cfg[key] !== 'string') errors.push(key + ' must be a string');
-    else if (cfg[key] !== '' && !path.isAbsolute(cfg[key])) errors.push(key + ' must be an absolute path');
-    else if (cfg[key].includes('\0')) errors.push(key + ' contains a NUL');
+    else if (cfg[key] && !path.isAbsolute(cfg[key])) errors.push(key + ' must be an absolute path');
   }
-  if (!THINKING.has(cfg.thinking)) errors.push('thinking must be off, low, medium, high, or xhigh');
-  if (!MODES.has(cfg.mode)) errors.push('mode must be 1080p or 2k');
+  if (!THINKING.has(cfg.thinking)) errors.push('bad thinking value');
+  if (!MODES.has(cfg.mode)) errors.push('bad mode');
   const ports = ['llamaPort', 'comfyPort', 'uiPort'];
-  for (const key of ports) {
-    if (!Number.isInteger(cfg[key]) || cfg[key] < 1 || cfg[key] > 65535) errors.push(key + ' must be an integer port');
-  }
-  if (new Set(ports.map((key) => cfg[key])).size !== ports.length) errors.push('ports must be distinct');
-  if (cfg.allowDownloads !== false) errors.push('allowDownloads must be false; this skill does not download');
-  if (cfg.allowSystemChanges !== false) errors.push('allowSystemChanges must be false; this skill does not change the system');
+  for (const key of ports) if (!Number.isInteger(cfg[key]) || cfg[key] < 1 || cfg[key] > 65535) errors.push(key + ' must be a port');
+  if (new Set(ports.map((key) => cfg[key])).size !== 3) errors.push('ports must be distinct');
+  if (cfg.allowDownloads !== false) errors.push('allowDownloads must be false');
+  if (cfg.allowSystemChanges !== false) errors.push('allowSystemChanges must be false');
   if (!cfg.expectedBytes || typeof cfg.expectedBytes !== 'object' || Array.isArray(cfg.expectedBytes)) errors.push('expectedBytes must be an object');
   else {
     for (const [key, value] of Object.entries(cfg.expectedBytes)) {
-      if (!FILES.has(key)) errors.push('expectedBytes.' + key + ' is not a file field');
-      else if (!Number.isInteger(value) || value < 0) errors.push('expectedBytes.' + key + ' must be a non-negative integer');
-      else if (cfg[key] === '') errors.push('expectedBytes.' + key + ' is set but the path is empty');
+      if (!FILE_KEYS.has(key) || !Number.isInteger(value) || value < 0) errors.push('bad expectedBytes.' + key);
+      else if (!cfg[key]) errors.push('expectedBytes.' + key + ' has no path');
     }
   }
   return errors;
 }
 
-function commandOnPath(name) {
-  const parts = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const suffixes = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
-  for (const dir of parts) {
-    for (const suffix of suffixes) {
-      try { if (fs.statSync(path.join(dir, name + suffix)).isFile()) return true; } catch { /* next */ }
-    }
+
+function portListening(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port, family: 4 });
+    const done = (value) => { socket.removeAllListeners(); socket.destroy(); resolve(value); };
+    socket.setTimeout(200);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
+}
+function httpJson(port, method, urlPath, body, ms) {
+  return new Promise((resolve, reject) => {
+    const data = body == null ? null : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+    const req = http.request({
+      host: '127.0.0.1', port, method, path: urlPath,
+      headers: data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {},
+      timeout: ms,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed = text;
+        try { parsed = JSON.parse(text); } catch { /* text */ }
+        resolve({ status: res.statusCode, body: parsed, text });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('error', reject);
+    req.end(data || undefined);
+  });
+}
+async function waitOk(port, urlPath, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    try { const res = await httpJson(port, 'GET', urlPath, null, 500); if (res.status === 200) return true; } catch { /* retry */ }
+    await new Promise((resolve) => setTimeout(resolve, 40));
   }
   return false;
 }
 
 
-function priorOk(input, expected) {
-  if (!expected || !input) return { ok: true, checked: false };
-  if (input.stage !== expected) return { ok: false, error: 'input stage is not ' + expected };
-  if (input.ok !== true) return { ok: false, error: 'previous stage did not report ok true' };
-  return { ok: true, checked: true };
+function artifactDir(dir, confirm) {
+  if (!confirm) return { ok: false, error: 'pass --confirm-write for the artifact directory' };
+  if (!dir || !path.isAbsolute(dir)) return { ok: false, error: 'artifact dir must be absolute' };
+  let stat;
+  try { stat = fs.statSync(dir); } catch { return { ok: false, error: 'artifact dir not found' }; }
+  if (!stat.isDirectory()) return { ok: false, error: 'artifact dir is not a directory' };
+  return { ok: true, dir: path.resolve(dir) };
 }
+function inside(dir, target) {
+  const rel = path.relative(fs.realpathSync(dir), fs.realpathSync(target));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+function writeNamed(dir, name, data) {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return { ok: false, error: 'artifact name rejected' };
+  const target = path.join(dir, name);
+  fs.writeFileSync(target, data);
+  if (!inside(dir, target)) return { ok: false, error: 'artifact write left the directory', path: target };
+  return { ok: true, path: target };
+}
+
+
+function commandText(pid) {
+  if (process.platform !== 'linux') return '';
+  try { return fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8'); } catch { return null; }
+}
+function identityOk(pid, exe) {
+  const text = commandText(pid);
+  if (text == null) return 'dead';
+  if (!text) return 'dead';
+  if (text.includes(exe) || text.includes(path.basename(exe))) return 'match';
+  return 'other';
+}
+async function stopOwned(pid, exe) {
+  const state = identityOk(pid, exe);
+  if (state === 'dead') return { stopped: true, pid, reason: 'already-dead' };
+  if (state === 'other') return { stopped: false, pid, reason: 'identity-mismatch' };
+  if (process.platform === 'win32') {
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: false, stdio: 'ignore', windowsHide: true });
+      killer.on('exit', resolve);
+      killer.on('error', resolve);
+    });
+  } else {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+  }
+  return { stopped: true, pid, reason: 'owned-pid-only' };
+}
+function startOwned(exe, args, cwd, logPath, extraEnv) {
+  const logFd = fs.openSync(logPath, 'a');
+  const child = spawn(exe, args, {
+    cwd,
+    env: Object.assign({}, process.env, extraEnv),
+    shell: false,
+    stdio: ['ignore', logFd, logFd],
+    windowsHide: true,
+  });
+  return child;
+}
+
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.error) return finish(base({ ok: false, exitCode: EXIT.USAGE, error: args.error, reportComplete: false }));
-  if (args.flags.help) {
-    process.stdout.write(INLINE.usage.join('\n') + '\n');
-    return EXIT.OK;
-  }
-  if (args.flags.example) {
-    if (INLINE.kind !== 'validate') return finish(base({ ok: false, exitCode: EXIT.USAGE, error: 'example config is printed only by the validate-config script' }));
-    process.stdout.write(JSON.stringify(INLINE.example, null, 2) + '\n');
-    return EXIT.OK;
-  }
-  const allowed = new Set(['config', 'workspace', 'input-json']);
-  for (const key of Object.keys(args.options)) {
-    if (!allowed.has(key)) return finish(base({ ok: false, exitCode: EXIT.USAGE, error: 'unknown option --' + key }));
-  }
-  if (args.flags.confirmWrite && INLINE.kind !== 'dependencies') return finish(base({ ok: false, exitCode: EXIT.USAGE, error: '--confirm-write is only valid for the dependencies script' }));
-  const input = loadInput(Object.hasOwn(args.options, 'input-json') ? args.options['input-json'] : null);
-  if (!input.ok) return finish(base({ ok: false, exitCode: input.exitCode, error: input.error, reportComplete: false }));
-  if (INLINE.kind === 'preflight') {
-    if (Object.keys(args.options).length || args.flags.confirmWrite) return finish(base({ ok: false, exitCode: EXIT.USAGE, error: 'preflight accepts no config and starts nothing' }));
-    return finish(base({
-      ok: true,
-      exitCode: EXIT.OK,
-      reportComplete: true,
-      checksMayContinue: true,
-      stopPipeline: true,
-      pipelineBlocked: true,
-      host: {
-        platform: process.platform,
-        arch: process.arch,
-        node: process.version,
-        nvidiaSmiOnPath: commandOnPath('nvidia-smi'),
-        nvidiaSmiNote: 'A name on PATH is not a GPU test.',
-      },
-      blockers: [{ id: 'gpu-process-lifecycle-undocumented', detail: INLINE.blocker }],
-    }));
-  }
-  if (INLINE.kind === 'blocked') {
-    if (!input.value) return finish(base({ ok: false, exitCode: EXIT.MISSING, error: 'pass --input-json from the previous check', reportComplete: false }));
-    return finish(base({
-      ok: false,
-      exitCode: EXIT.BLOCKED,
-      reportComplete: true,
-      checksMayContinue: false,
-      stopPipeline: true,
-      pipelineBlocked: true,
-      prior: input.summary,
-      protocolMismatch: Boolean(INLINE.expects) && input.value.stage !== INLINE.expects,
-      reason: 'This stage is not run inside the marketplace temporary-file session. Images and weights are not returned through stdout.',
-    }));
-  }
+  if (args.error) return finish(base({ ok: false, exitCode: EXIT.USAGE, error: args.error, spawned: false }));
+  if (args.flags.help) { process.stdout.write(INLINE.usage.join('\n') + '\n'); return EXIT.OK; }
+  const limit = timeoutMs(args.options['service-timeout-ms']);
+  if (limit == null) return finish(base({ ok: false, exitCode: EXIT.INVALID, error: 'bad service timeout', spawned: false }));
+  const input = loadInput(args.options['input-json']);
+  if (!input.ok) return finish(base({ ok: false, exitCode: input.exitCode, error: input.error, spawned: false }));
+  if (!input.value) return finish(base({ ok: false, exitCode: EXIT.MISSING, error: 'pass --input-json', spawned: false }));
+  const place = artifactDir(args.options['artifact-dir'], args.flags.confirmWrite);
+  if (!place.ok) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: place.error, spawned: false }));
+  if (input.value.stage !== 'gpu-handoff' || input.value.ok !== true || input.value.artifactDir !== place.dir) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'handoff did not authorize this directory', protocolMismatch: input.value.stage !== 'gpu-handoff', spawned: false }));
   const loaded = loadConfig(args.options.config);
-  if (!loaded.ok) return finish(base({ ok: false, exitCode: loaded.exitCode, error: loaded.error, reportComplete: false }));
+  if (!loaded.ok) return finish(base({ ok: false, exitCode: loaded.exitCode, error: loaded.error, spawned: false }));
   const errors = structuralErrors(loaded.config);
-  if (errors.length) return finish(base({ ok: false, exitCode: EXIT.INVALID, error: 'invalid config', configErrors: errors, reportComplete: false }));
-  const prior = priorOk(input.value, input.value ? INLINE.expects : null);
-  if (!prior.ok) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: prior.error, prior: input.summary, reportComplete: true }));
-  if (INLINE.kind === 'validate') {
-    return finish(base({
-      ok: true,
-      exitCode: EXIT.OK,
-      reportComplete: true,
-      checksMayContinue: true,
-      stopPipeline: true,
-      pipelineBlocked: true,
-      structurallyValid: true,
-      prior: input.summary,
-    }));
+  if (errors.length) return finish(base({ ok: false, exitCode: EXIT.INVALID, configErrors: errors, spawned: false }));
+  const cfg = loaded.config;
+  const promptPath = path.join(place.dir, 'prompt.txt');
+  let prompt = ''; try { prompt = fs.readFileSync(promptPath, 'utf8'); } catch { return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt artifact missing', spawned: false })); }
+  if (crypto.createHash('sha256').update(prompt).digest('hex') !== input.value.promptSha256) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt hash mismatch', spawned: false }));
+  if (args.options.image) {
+    let stat; try { stat = fs.statSync(args.options.image); } catch { stat = null; }
+    if (!stat || !stat.isFile() || stat.size > 30 * 1024 * 1024) return finish(base({ ok: false, exitCode: EXIT.INVALID, error: 'reference image must be an existing file up to 30MB', spawned: false }));
   }
-  const report = await assess(loaded.config, args.options.workspace || '', Boolean(args.flags.confirmWrite));
-  return finish(base({
-    ok: false,
-    exitCode: EXIT.BLOCKED,
-    reportComplete: true,
-    checksMayContinue: false,
-    stopPipeline: true,
-    pipelineBlocked: true,
-    dependencyOk: report.dependencyOk,
-    workspaceVerified: report.workspace.verified,
-    workspaceDetail: report.workspace.detail,
-    blockers: report.blockers,
-    warnings: report.warnings,
-    files: report.files,
-    ports: report.ports,
-    freeBytes: report.freeBytes,
-    prior: input.summary,
-  }));
+  if (await portListening(cfg.comfyPort)) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'image port is in use; not stopping it', spawned: false }));
+  let graph; try { graph = JSON.parse(fs.readFileSync(cfg.graph, 'utf8')); } catch { return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'graph cannot be read', spawned: false })); }
+  if (graph['5'] && graph['5'].inputs) graph['5'].inputs.prompt = prompt;
+  const logWrite = writeNamed(place.dir, 'image-service.log', '');
+  if (!logWrite.ok) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: logWrite.error, spawned: false }));
+  const child = startOwned(cfg.python, ['-s', cfg.comfyMain, '--fast-disk', '--disable-pinned-memory', '--windows-standalone-build'], cfg.comfyCwd, logWrite.path, { QWEN_COMFY_OUTPUT: cfg.comfyOutput, QWEN_COMFY_PORT: String(cfg.comfyPort) });
+  let payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'image stage failed', spawned: true };
+  try {
+    if (!(await waitOk(cfg.comfyPort, '/system_stats', limit))) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'image service did not become healthy', spawned: true };
+    else {
+      const submitted = await httpJson(cfg.comfyPort, 'POST', '/prompt', { prompt: graph }, limit);
+      const id = submitted.body && submitted.body.prompt_id;
+      if (submitted.status !== 200 || !id) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'image submit failed', spawned: true };
+      else {
+        let done = null;
+        const end = Date.now() + limit;
+        while (Date.now() < end && !done) {
+          const hist = await httpJson(cfg.comfyPort, 'GET', '/history/' + encodeURIComponent(id), null, 1000);
+          const entry = hist.body && hist.body[id];
+          if (entry && entry.status && (entry.status.completed || entry.status.status_str === 'error')) done = entry;
+          else await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+        const images = [];
+        if (done && done.outputs) for (const key of Object.keys(done.outputs)) for (const image of (done.outputs[key].images || [])) images.push(image);
+        if (!done || done.status.status_str === 'error' || !images.length) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'image service produced no file', spawned: true };
+        else {
+          const source = path.join(cfg.comfyOutput, images[0].filename);
+          const bytes = fs.readFileSync(source);
+          if (bytes.length < 8 || bytes[0] !== 0x89 || bytes.toString('ascii', 1, 4) !== 'PNG') payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'service file is not a PNG', spawned: true };
+          else {
+            const copied = writeNamed(place.dir, 'service-output.png', bytes);
+            if (!copied.ok) payload = { ok: false, exitCode: EXIT.BLOCKED, error: copied.error, spawned: true };
+            else {
+              const fixture = Boolean(done.fixture === true);
+              payload = { ok: true, exitCode: EXIT.OK, spawned: true, checksMayContinue: true, stopPipeline: false, artifactDir: place.dir, artifactFile: 'service-output.png', imageSha256: crypto.createHash('sha256').update(bytes).digest('hex'), promptSha256: input.value.promptSha256, serviceDeclaredFixture: fixture, evidenceClass: fixture ? 'controlled-fixture' : 'service-output-unverified-hardware' };
+            }
+          }
+        }
+      }
+    }
+  } catch { payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'image service call failed', spawned: true }; }
+  const released = await stopOwned(child.pid, cfg.python);
+  if (payload.ok && !released.stopped) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'owned image process was not released', spawned: true };
+  if (payload.ok) payload.ownedProcessReleased = true;
+  return finish(base(payload));
 }
 
-main().then((code) => process.exit(code)).catch(() => {
-  emit(base({ ok: false, exitCode: 1, error: 'internal error', reportComplete: false }));
+main().then((code) => process.exit(code)).catch((error) => {
+  emit(base({ ok: false, exitCode: 1, error: String(error && error.message || 'internal error').slice(0, 180), spawned: false }));
   process.exit(1);
 });

@@ -14,19 +14,23 @@ Sources read for this note:
 
 (A) SKILL.md is the marketplace entry. The agent fetches each stage script and runs that file alone. This matches the published load and temporary-file rules. It is not a platform scheduler. Argument, stdin, stdout, exit code, timeout, and working-directory behavior are not documented platform APIs. This package defines a candidate stdout JSON object and tests it with local Node only.
 
-(B) A program dispatcher that imports, reads, or launches a sibling package script does not meet the temporary-file rule. Copying the package into a folder, downloading the rest of the package, or stitching files at runtime is the same bypass. A single self-contained script is just one stage, not a multi-file launcher. These stage scripts do not import `child_process` and do not spawn anything.
+(B) A program dispatcher that imports, reads, or launches a sibling package script does not meet the temporary-file rule. The stage scripts do not launch `orchestrator/orchestrator.mjs` either. That would move the pipeline outside the script instead of implementing the stage.
 
-(C) `orchestrator/orchestrator.mjs` is the local full program. It stays in the repository. It is not copied into `scripts/` because a packaged copy would be executed alone and would look for files it does not have. The stage scripts do not launch it. Running it is an operator action outside the marketplace flow, and it is not Agensi-guaranteed execution.
+(C) `orchestrator/orchestrator.mjs` remains available for an operator who runs the checkout directly. It is not the marketplace entry.
+
+## Success path
+
+Prompt and image stages start the executable named in the user config, speak the local HTTP calls used by the repository orchestrator, write the service output into the authorized artifact directory, and stop only the pid they started. Handoff checks that the prompt port is closed and does not signal anyone. Outputs checks the PNG bytes and hash. Cleanup signals a pid only when an owned record in that directory matches the process command.
+
+If the executable is missing, a port is already open, the artifact directory was not authorized, or the service fails, the stage exits 5. Lack of an Agensi certification is not itself that failure. `liveHardwareVerified` stays false. A response with `fixture: true` is recorded as `controlled-fixture` and `realModelOutput` stays false.
 
 ## What was rejected
 
-One dispatcher script that starts the other stage files, or starts `orchestrator.mjs`, was rejected. The loader does not promise that temporary files share a directory, and a script must not read the package. Process lifetime after the temporary file is removed is undocumented, so a child GPU process cannot be handed to the next script.
-
-Reimplementing `writePrompt` and `render` inside the stage scripts was rejected. That would be a second pipeline, it still needs one resident process to free VRAM before the image model starts, and image bytes cannot be carried in the candidate JSON.
+Calling the repository orchestrator from a stage script was rejected. It would bypass the self-contained rule by executing out-of-package code. Reimplementing the whole web console inside every script was rejected. Each script contains only its stage.
 
 ## Stage boundaries in this repository
 
-The local CLI in `orchestrator/orchestrator.mjs` does this in one process: `startLlama`, `writePrompt`, `stopLlama`, `startComfy`, `uploadImage`, `render`, `deliverImage`, `stopComfy`, then either `stopLlama` (`QWEN_RELEASE_ON_EXIT=1`) or `startLlama` (historical reload). The failure path stops ComfyUI and llama if this process started them. Those calls are not separate programs. The packaged scripts name the same symbols and then exit 5.
+The local CLI in `orchestrator/orchestrator.mjs` does this in one process: `startLlama`, `writePrompt`, `stopLlama`, `startComfy`, `uploadImage`, `render`, `deliverImage`, `stopComfy`, then either `stopLlama` (`QWEN_RELEASE_ON_EXIT=1`) or `startLlama` (historical reload). The packaged stages perform the same HTTP steps in separate processes. Each service stage starts its own executable and stops that pid before it exits, so no child-process object is handed to the next temporary script.
 
 `chat-console.mjs` is a second local console. It is not a stage. The PowerShell fetchers, firewall tools, pagefile tool, and reboot script are not stages and are not invoked.
 

@@ -1,7 +1,7 @@
 ---
 name: qwen-duo-12g
-description: "Use when checking a user-supplied local serial prompt-then-image setup before any model starts. Run the packaged stage scripts one at a time and stop when a script reports a blocker. Do not use this skill to download weights, change the system, or claim that an Agensi buyer session can host llama.cpp or ComfyUI."
-summary: "Reports whether a user-owned serial prompt-then-image setup has the files and workspace a local run would need. The packaged scripts stop without downloading weights or starting GPU services. A Windows llama.cpp and ComfyUI run is a separate local program, not marketplace-approved execution."
+description: "Use when running a user-configured local serial prompt-then-image workflow one stage at a time. Each stage script starts only the executable named in that user's config, writes into a directory the user authorizes, and stops that process before exiting. Do not use it to download weights, change the system, or claim that a live GPU run or an Agensi buyer session has been verified."
+summary: "Runs a local prompt-then-image workflow as separate stage scripts. Each service stage starts only the user's configured executable, writes into an authorized directory, and stops that process. Missing files, a busy port, or a failed service stops the run. Live Windows GPU execution is not certified."
 version: "0.1.0"
 tags:
   - local-check
@@ -12,9 +12,9 @@ keywords:
   - stage-scripts
   - workspace-probe
 use_cases:
-  - "Check a user-supplied config without starting models"
-  - "Report missing files, ports, and an unverified workspace"
-  - "Stop before a local GPU pipeline whose platform support is not established"
+  - "Run a configured local prompt service and keep only its text hash"
+  - "Render through the configured image service into an authorized directory"
+  - "Stop a stage when its executable, port, or artifact directory is not ready"
 ---
 
 # Qwen Duo 12G local pipeline check
@@ -27,7 +27,7 @@ Read [the design boundary](references/DESIGN-SPLIT.md) and [the requirement map]
 
 ## Unresolved submission blocker
 
-Windows GPU, llama.cpp, ComfyUI, background-process lifetime, cross-script working directories, and a shared artifact store are not established for an Agensi buyer session. Packaged scripts therefore cannot generate an image. They must not be described as platform-approved or as a completed listing. No upload is part of these instructions.
+Windows GPU, llama.cpp, ComfyUI, and a shared buyer-session workspace are not established for an Agensi buyer session. The stage scripts still contain the local success path. They block when the files, free ports, or authorized directory required by that path are missing. `liveHardwareVerified` is always false. A service that labels itself `fixture: true` is a controlled fixture, not a real model result. No upload is part of these instructions.
 
 `marketplaceApproved` is always false. `protocolGuaranteedByAgensi` is always false. Stdout JSON is a candidate handoff this repository tests with Node. It is not a documented Agensi argument, stdin, stdout, or exit-code API.
 
@@ -35,57 +35,53 @@ Windows GPU, llama.cpp, ComfyUI, background-process lifetime, cross-script worki
 
 Fetch one script by its path and run that file alone. The host may write it to a temporary file and remove that temporary file later. Do not expect another package file to sit beside it. Do not rewrite the script. Do not save the script into the user's project. Do not pass secrets, tokens, or credentials in arguments or in JSON. Do not put image bytes or model weights in `--input-json`; that payload must stay under 16KB and must not contain secret-like fields.
 
-These scripts do not delete user images or other user files. Removing a temporary copy of a script is the host's job. The dependencies script, and only when the user passes both `--workspace` and `--confirm-write`, creates one probe file and removes that probe file if the write stayed inside the workspace. If a file with the probe name already exists, the script leaves it untouched.
+These scripts do not delete user images. Removing a temporary copy of a script is the host's job. The dependencies script creates one probe file only when `--confirm-write` is set, and removes that probe if the write stayed inside the directory. If that name already exists, it is left untouched.
 
-Stop the sequence when a script exits non-zero, when stdout is not one JSON object, or when `stopPipeline` is true and the next file would be a model stage. Do not install software, download weights, or change system settings to make a check pass.
+Stop when a script exits non-zero or stdout is not one JSON object. Do not install software, download weights, or change system settings. Do not pass secrets. Do not put image bytes or model weights in `--input-json`.
+
+Pass the previous script's stdout as `--input-json` only when it is smaller than 16KB and has no secret-like fields. The prompt text and the image stay in the artifact directory. The agent passes the directory path and the hashes.
 
 ## Steps
 
 ### preflight
 
-Run `01-preflight.mjs` with no config. A finished report exits 0 and sets `checksMayContinue` true. It also sets `stopPipeline` and `pipelineBlocked` true. That means the model stages must not run. The only later scripts allowed after a zero exit are `02-validate-config.mjs` and, if that also exits 0, `03-dependencies.mjs`.
+Run `01-preflight.mjs` with no config. Exit 0 means the host report was written. `liveHardwareVerified` is false. Continue only when exit code is 0.
 
 ### validate-config
 
-If preflight did not exit 0, stop. Otherwise ask the user for an absolute config path. The empty shape is printed by `02-validate-config.mjs --print-example-config`. The same shape is in [the example file](templates/config.example.json) for a human reader; the script does not read that file.
+Ask the user for an absolute config path. `02-validate-config.mjs --print-example-config` prints the empty shape. The human-readable copy is [the example file](templates/config.example.json); the script does not read it.
 
-Run `02-validate-config.mjs --config <absolute-file>`. Optionally pass preflight's stdout as `--input-json` when it is small and contains no secrets. Exit 0 means the JSON shape is valid, not that the machine can render. Exit 3 means the file is missing. Exit 4 means it is invalid. Stop on 3 or 4.
+Run `02-validate-config.mjs --config <absolute-file>`. You may pass preflight's stdout as `--input-json`. Exit 0 means the shape is valid. Exit 3 means the file is missing. Exit 4 means it is invalid or contains a sensitive field. Stop on 3 or 4.
 
 ### dependencies
 
-Run `03-dependencies.mjs --config <absolute-file>` only after validate-config exits 0. Pass validate-config's stdout as `--input-json` only when it is small and non-secret. This script stats paths the user named. It does not hash multi-gigabyte files and it does not start servers.
+Run `03-dependencies.mjs --config <absolute-file> --artifact-dir <absolute-dir> --confirm-write` after validate-config exits 0. Pass that stdout as `--input-json`.
 
-A shared directory is not assumed. Add `--workspace <absolute-dir> --confirm-write` only when the user names a directory they authorize for a write probe. Without that pair, `workspaceVerified` stays false. This script exits 5. `dependencyOk` and `workspaceVerified` are separate fields. Exit 5 means stop. Do not run the model-stage scripts.
+This script stats the configured files and connects to the two loopback ports. A listening port sets `dependencyOk` false and is not closed. The artifact directory is verified only with `--confirm-write`. Exit 0 means the files exist, the ports are free, and the directory accepted a probe write. Exit 5 means stop. `hostPlatform` is recorded and is not itself a failure.
 
 ### prompt-model
 
-Do not run `04-prompt-model.mjs` when `stopPipeline` is true. If it is run anyway, pass the previous stdout as `--input-json`. The script exits 5, starts nothing, and does not return a prompt. In the local program this stage is `startLlama` then `writePrompt` inside one process. That program is not launched here.
+Run `04-prompt-model.mjs` with the same config and artifact directory, `--confirm-write`, `--task <text>`, and the dependencies stdout. The script starts `llamaExe` itself, requests one prompt, writes `prompt.txt`, and stops that process before it exits. It does not stop a server it did not start. Exit 0 means the text file and its hash are in the artifact directory. `serviceDeclaredFixture: true` means the service labeled the text as a fixture. `realModelOutput` stays false.
 
 ### gpu-handoff
 
-Do not run `05-gpu-handoff.mjs` when `stopPipeline` is true. The script exits 5 and does not stop or signal any process. The local program's handoff is `stopLlama`, which waits until the server it started no longer answers. That is not a VRAM measurement, and this script does not perform it.
+Run `05-gpu-handoff.mjs` with the prompt-model stdout. It checks that the llama port is no longer accepting connections and that `prompt.txt` matches the hash. It does not signal any process. If the port is still open, it exits 5 and leaves that process alone.
 
 ### image-stage
 
-Do not run `06-image-stage.mjs` when `stopPipeline` is true. The script exits 5 and does not start ComfyUI. The local program's image stage is `startComfy`, optional `uploadImage`, then `render`, still in the same process as the prompt stage. Image bytes are not accepted through `--input-json`.
+Run `06-image-stage.mjs` with the handoff stdout and `--service-timeout-ms` when a shorter bound is wanted. The script starts `python` with the configured ComfyUI entry, submits the graph, copies a PNG from `comfyOutput` into `service-output.png`, and stops that process. It does not draw an image itself. A missing service file exits 5.
 
 ### outputs
 
-Do not run `07-outputs.mjs` when `stopPipeline` is true. The script exits 5 and does not copy an image. The local program writes with `deliverImage`. A rendered image is too large to return through this conversation. Do not claim an output path unless a verified workspace already contains the file.
+Run `07-outputs.mjs` with the image-stage stdout. It checks that `service-output.png` is inside the artifact directory, begins with the PNG signature, and matches `imageSha256`. It does not create a replacement image.
 
 ### cleanup
 
-Do not run `08-cleanup.mjs` when `stopPipeline` is true. The script exits 5, kills nothing, and deletes nothing. The local one-shot flag `QWEN_RELEASE_ON_EXIT=1` stops ComfyUI and the llama process that same process started. The historical console path reloads llama instead. Neither path is invoked by this skill.
+Run `08-cleanup.mjs` with the outputs stdout. It stops a process only when an `owned-*.json` record in the artifact directory names that pid and the process command matches the recorded executable. An open port without that match is reported and left running. The PNG is not deleted.
 
 ## Local program, not a marketplace script
 
-The repository file `orchestrator/orchestrator.mjs` remains the full local program. An operator who already has that checkout, the weights, and a Windows GPU can run it themselves:
-
-```text
-node <checkout>/orchestrator/orchestrator.mjs --run "<task>" --mode 1080p
-```
-
-Optional flags are `--mode 2k` and `--image <file>`. That command is not a packaged script, not an Agensi-guaranteed run, and not something these stage scripts launch. Do not download the repository from inside a stage script. Chat-only `chat-console.mjs` shares the language-model port; do not start it beside an image run. PowerShell fetchers, firewall scripts, pagefile scripts, and reboot scripts are not part of this sequence.
+The repository file `orchestrator/orchestrator.mjs` remains a separate local program. The stage scripts do not launch it. An operator who already has that checkout can still run `node <checkout>/orchestrator/orchestrator.mjs --run "<task>"`. Reference-image upload remains on that command. The packaged image stage checks an optional `--image` file but submits the text prompt. That local command is not Agensi-guaranteed execution.
 
 ## Exit codes
 
