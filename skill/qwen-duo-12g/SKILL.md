@@ -65,11 +65,11 @@ Run `04-prompt-model.mjs` with the same config and artifact directory, `--confir
 
 ### gpu-handoff
 
-Run `05-gpu-handoff.mjs` with the prompt-model stdout. It checks that the llama port is no longer accepting connections and that `prompt.txt` matches the hash. It does not signal any process. If the port is still open, it exits 5 and leaves that process alone.
+Run `05-gpu-handoff.mjs` with the prompt-model stdout. It continues only when the recorded process start time is no longer running and the llama port is closed. A closed port by itself is not release evidence, and this script does not measure VRAM or signal a process.
 
 ### image-stage
 
-Run `06-image-stage.mjs` with the handoff stdout and `--service-timeout-ms` when a shorter bound is wanted. The script starts `python` with the configured ComfyUI entry, submits the graph, copies a PNG from `comfyOutput` into `service-output.png`, and stops that process. It does not draw an image itself. A missing service file exits 5.
+Run `06-image-stage.mjs` with the handoff stdout and `--service-timeout-ms` when a shorter bound is wanted. The script requires graph node 5 and writes the task prompt into it before submitting. It starts `python` with the configured ComfyUI entry. If `--image` is an absolute file of at most 30MB, the script uploads that file and wires it into the graph before the submit. It copies a PNG only from the history entry's `type`, `subfolder`, and `filename` after a realpath containment check. It then stops that process. A missing node, a rejected path, or a missing service file exits 5. An older file that the history entry names for this prompt id can still be the right cached output.
 
 ### outputs
 

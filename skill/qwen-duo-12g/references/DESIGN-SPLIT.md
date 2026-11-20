@@ -36,7 +36,7 @@ The local CLI in `orchestrator/orchestrator.mjs` does this in one process: `star
 
 ## Candidate protocol, tested locally only
 
-Each script prints one JSON object. A later script accepts `--input-json` up to 16KB, rejects secret-like keys and token-shaped values, and echoes only a fixed set of short fields. Stdin is not read. No test here is an Agensi agent run. Cross-script cwd, a persistent filesystem, timeouts, and Windows GPU lifecycle remain unverified. If a shared user directory is not shown with `--workspace` and `--confirm-write`, the pipeline stays blocked.
+Each script prints one JSON object. A later script accepts `--input-json` up to 16KB, rejects secret-like keys and token-shaped values, and echoes only a fixed set of short fields. Stdin is not read. No test here is an Agensi agent run. Cross-script cwd, a persistent filesystem, timeouts, and Windows GPU lifecycle remain unverified. If a shared user directory is not shown with `--artifact-dir` and `--confirm-write`, the pipeline stays blocked.
 
 ## Isolation test
 

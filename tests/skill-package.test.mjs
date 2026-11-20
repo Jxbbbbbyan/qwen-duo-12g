@@ -152,6 +152,168 @@ test('zip has one top-level folder and is reproducible', () => {
   assert.equal(listed.stdout.trim(), '17');
 });
 
+test('a missing executable returns structured JSON and does not crash', () => {
+  const world = makeWorld();
+  const validated = jsonOf(run(path.join(SCRIPTS, '02-validate-config.mjs'), ['--config', world.cfgPath]));
+  const deps = jsonOf(run(path.join(SCRIPTS, '03-dependencies.mjs'), ['--config', world.cfgPath, '--artifact-dir', world.art, '--confirm-write', '--input-json', JSON.stringify(validated)]));
+  assert.equal(deps.ok, true);
+  const broken = JSON.parse(fs.readFileSync(world.cfgPath, 'utf8'));
+  broken.llamaExe = path.join(world.root, 'missing-llama');
+  const brokenPath = path.join(world.root, 'broken.json');
+  fs.writeFileSync(brokenPath, JSON.stringify(broken));
+  const result = run(path.join(SCRIPTS, '04-prompt-model.mjs'), ['--config', brokenPath, '--artifact-dir', world.art, '--confirm-write', '--task', 'x', '--service-timeout-ms', '1000', '--input-json', JSON.stringify(deps)]);
+  assert.equal(result.status, 5);
+  assert.match(result.stdout, /could not be started/);
+  assert.equal(result.stderr.includes('Unhandled'), false);
+});
+
+test('cleanup does not signal a process whose invocation token does not match', () => {
+  const world = makeWorld();
+  const sleeper = path.join(world.root, 'sleeper.mjs');
+  fs.writeFileSync(sleeper, 'setInterval(() => {}, 1000);\n');
+  const token = '0123456789abcdef0123456789abcdef';
+  const victim = spawn(process.execPath, [sleeper, '--qwen-owned-token', token], { stdio: 'ignore' });
+  const decoy = spawn(process.execPath, [sleeper, 'victim-marker.mjs'], { stdio: 'ignore' });
+  waitPid(victim.pid);
+  waitPid(decoy.pid);
+  fs.writeFileSync(path.join(world.art, 'owned-prompt-model.json'), JSON.stringify({
+    pid: decoy.pid, exe: fs.readlinkSync('/proc/' + decoy.pid + '/exe'), starttime: procStart(decoy.pid), token,
+  }));
+  fs.writeFileSync(path.join(world.art, 'service-output.png'), PNG_B64);
+  const outputs = { stage: 'outputs', ok: true, artifactDir: world.art, serviceDeclaredFixture: true };
+  const result = run(path.join(SCRIPTS, '08-cleanup.mjs'), ['--config', world.cfgPath, '--artifact-dir', world.art, '--confirm-write', '--input-json', JSON.stringify(outputs)]);
+  assert.equal(jsonOf(result).stoppedOwnedPids.includes(decoy.pid), false);
+  assert.equal(alive(decoy.pid), true);
+  assert.equal(alive(victim.pid), true);
+  victim.kill('SIGKILL');
+  decoy.kill('SIGKILL');
+});
+
+test('cleanup stops only a process whose exe, start time, and token all match', () => {
+  const world = makeWorld();
+  const token = 'abcdef0123456789abcdef0123456789';
+  const sleeper = path.join(world.root, 'sleeper.mjs');
+  fs.writeFileSync(sleeper, 'setInterval(() => {}, 1000);\n');
+  const owned = spawn(process.execPath, [sleeper, '--qwen-owned-token', token], { stdio: 'ignore' });
+  const other = spawn(process.execPath, [sleeper], { stdio: 'ignore' });
+  waitPid(owned.pid);
+  waitPid(other.pid);
+  fs.writeFileSync(path.join(world.art, 'owned-image-stage.json'), JSON.stringify({
+    pid: owned.pid, exe: fs.readlinkSync('/proc/' + owned.pid + '/exe'), starttime: procStart(owned.pid), token,
+  }));
+  fs.writeFileSync(path.join(world.art, 'service-output.png'), Buffer.from(PNG_B64, 'base64'));
+  const outputs = { stage: 'outputs', ok: true, artifactDir: world.art };
+  const result = run(path.join(SCRIPTS, '08-cleanup.mjs'), ['--config', world.cfgPath, '--artifact-dir', world.art, '--confirm-write', '--input-json', JSON.stringify(outputs)]);
+  assert.equal(result.status, 0, result.stdout);
+  assert.deepEqual(jsonOf(result).stoppedOwnedPids, [owned.pid]);
+  assert.equal(alive(other.pid), true);
+  other.kill('SIGKILL');
+});
+
+test('handoff does not treat a closed port as a stopped process', () => {
+  const world = makeWorld();
+  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  waitPid(sleeper.pid);
+  fs.writeFileSync(path.join(world.art, 'prompt.txt'), 'FIXTURE text');
+  const prior = {
+    stage: 'prompt-model', ok: true, artifactDir: world.art, ownedProcessReleased: true,
+    promptSha256: sha(fs.readFileSync(path.join(world.art, 'prompt.txt'))),
+    ownerPid: sleeper.pid, ownerStarttime: procStart(sleeper.pid), serviceDeclaredFixture: true,
+  };
+  const result = run(path.join(SCRIPTS, '05-gpu-handoff.mjs'), ['--config', world.cfgPath, '--artifact-dir', world.art, '--confirm-write', '--input-json', JSON.stringify(prior)]);
+  assert.equal(result.status, 5);
+  assert.equal(jsonOf(result).ownedProcessReleased, false);
+  assert.equal(alive(sleeper.pid), true);
+  sleeper.kill('SIGKILL');
+});
+
+test('image output rejects traversal and symlinks, and reads subfolder or temp bytes', () => {
+  const outside = Buffer.from('OUTSIDE-PNG-BYTES-NOT-REALLY');
+  const batch = Buffer.from(PNG_B64, 'base64');
+  const rootFile = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const rejected = runImage({ filename: '../outside.png' }, (world) => {
+    fs.writeFileSync(path.join(world.root, 'outside.png'), outside);
+  });
+  assert.equal(rejected.status, 5);
+  assert.equal(fs.existsSync(path.join(rejected.world.art, 'service-output.png')), false);
+  const linked = runImage({ filename: 'linked.png', skipWrite: true }, (world) => {
+    fs.writeFileSync(path.join(world.root, 'secret.png'), batch);
+    fs.symlinkSync(path.join(world.root, 'secret.png'), path.join(world.output, 'linked.png'));
+  });
+  assert.equal(linked.status, 5);
+  assert.equal(fs.existsSync(path.join(linked.world.art, 'service-output.png')), false);
+  const nested = runImage({ filename: 'pic.png', subfolder: 'batch', skipWrite: true }, (world) => {
+    fs.mkdirSync(path.join(world.output, 'batch'));
+    fs.writeFileSync(path.join(world.output, 'pic.png'), rootFile);
+    fs.writeFileSync(path.join(world.output, 'batch', 'pic.png'), batch);
+    const old = new Date('2020-01-01T00:00:00Z');
+    fs.utimesSync(path.join(world.output, 'batch', 'pic.png'), old, old);
+  });
+  assert.equal(nested.status, 0, nested.stdout);
+  assert.equal(sha(fs.readFileSync(path.join(nested.world.art, 'service-output.png'))), sha(batch));
+  const temp = runImage({ filename: 'pic.png', type: 'temp', fixture: false, skipWrite: true }, (world) => {
+    const tempDir = path.join(world.root, 'temp');
+    fs.mkdirSync(tempDir);
+    fs.writeFileSync(path.join(world.output, 'pic.png'), rootFile);
+    fs.writeFileSync(path.join(tempDir, 'pic.png'), batch);
+  });
+  assert.equal(temp.status, 0, temp.stdout);
+  assert.equal(sha(fs.readFileSync(path.join(temp.world.art, 'service-output.png'))), sha(batch));
+  assert.equal(jsonOf(temp).realModelOutput, false);
+});
+
+test('a graph without node 5 is not submitted', () => {
+  const world = makeWorld();
+  fs.writeFileSync(world.cfg.graph, '{"1":{"inputs":{"text":"SEED"}}}\n');
+  const result = runPreparedImage(world, {});
+  assert.equal(result.status, 5);
+  assert.match(result.stdout, /node 5/);
+  assert.equal(fs.existsSync(path.join(world.root, 'started-comfy.txt')), false);
+});
+
+test('a reference image is uploaded before the prompt is submitted', () => {
+  const world = makeWorld();
+  const image = path.join(world.root, 'reference.png');
+  fs.writeFileSync(image, Buffer.from(PNG_B64, 'base64'));
+  fs.writeFileSync(world.cfg.graph, '{"5":{"inputs":{"prompt":""}},"10":{"inputs":{}}}\n');
+  const result = runPreparedImage(world, { image });
+  assert.equal(result.status, 0, result.stdout);
+  const body = JSON.parse(fs.readFileSync(path.join(world.output, 'prompt-body.json'), 'utf8'));
+  assert.equal(body.prompt['5'].inputs.prompt.includes('FIXTURE'), true);
+  assert.equal(body.prompt['14'].inputs.image, 'ref.png');
+  assert.equal(jsonOf(result).referenceUploaded, true);
+});
+
+function waitPid(pid) {
+  const end = Date.now() + 1000;
+  while (Date.now() < end) {
+    try { fs.readlinkSync('/proc/' + pid + '/exe'); return; } catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); }
+  }
+  throw new Error('process did not appear: ' + pid);
+}
+function sha(bytes) {
+  return spawnSync(process.execPath, ['-e', 'process.stdout.write(require("crypto").createHash("sha256").update(Buffer.from(process.argv[1],"base64")).digest("hex"))', Buffer.from(bytes).toString('base64')], { encoding: 'utf8' }).stdout;
+}
+function procStart(pid) {
+  const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+  return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+}
+function runPreparedImage(world, options) {
+  fs.writeFileSync(path.join(world.art, 'prompt.txt'), 'FIXTURE prompt');
+  const prior = { stage: 'gpu-handoff', ok: true, ownedProcessReleased: true, artifactDir: world.art, promptSha256: sha(Buffer.from('FIXTURE prompt')), serviceDeclaredFixture: true };
+  const args = ['--config', world.cfgPath, '--artifact-dir', world.art, '--confirm-write', '--service-timeout-ms', '3000', '--input-json', JSON.stringify(prior)];
+  if (options.image) args.push('--image', options.image);
+  return run(path.join(SCRIPTS, '06-image-stage.mjs'), args, options.env ? { env: { ...process.env, ...options.env } } : {});
+}
+function runImage(spec, arrange) {
+  const world = makeWorld();
+  if (arrange) arrange(world);
+  const env = { QWEN_FIXTURE_IMAGE: JSON.stringify({ ...spec, fixture: spec.fixture !== false }) };
+  const result = runPreparedImage(world, { env });
+  return Object.assign(result, { world });
+}
+
+let nextPort = 22000 + (process.pid % 4000);
 function argsFor(name, world, prev) {
   if (name.startsWith('01')) return [];
   const common = ['--config', world.cfgPath];
@@ -178,7 +340,8 @@ function makeWorld(options = {}) {
   fs.writeFileSync(path.join(root, 'fake-comfy.mjs'), comfyFixture());
   fs.chmodSync(path.join(root, 'fake-llama.mjs'), 0o755);
   fs.chmodSync(path.join(root, 'fake-comfy.mjs'), 0o755);
-  const base = 20000 + (process.pid % 8000);
+  const base = nextPort;
+  nextPort += 40;
   const cfg = {
     schema: 'qwen-duo-12g.config/v1', projectRoot: project,
     llamaExe: path.join(root, 'fake-llama.mjs'), model: path.join(root, 'model.gguf'), mmproj: path.join(root, 'mm.gguf'),
@@ -190,7 +353,7 @@ function makeWorld(options = {}) {
   };
   const cfgPath = path.join(root, 'cfg.json');
   fs.writeFileSync(cfgPath, JSON.stringify(cfg));
-  return { root, art, project, cfg, cfgPath };
+  return { root, art, output, project, cfg, cfgPath };
 }
 
 function llamaFixture(fail) {
@@ -225,19 +388,35 @@ function comfyFixture() {
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+fs.writeFileSync(new URL('./started-comfy.txt', import.meta.url), 'yes');
 const port = Number(process.env.QWEN_COMFY_PORT);
 const png = Buffer.from('${PNG_B64}', 'base64');
 const server = http.createServer((req, res) => {
   if (req.url === '/system_stats') { res.writeHead(200); return res.end('{}'); }
-  if (req.method === 'POST' && req.url === '/prompt') {
+  if (req.method === 'POST' && req.url === '/upload/image') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ prompt_id: 'p1' }));
+    return res.end(JSON.stringify({ name: 'ref.png' }));
+  }
+  if (req.method === 'POST' && req.url === '/prompt') {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      fs.writeFileSync(path.join(process.env.QWEN_COMFY_OUTPUT, 'prompt-body.json'), raw);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ prompt_id: 'p1' }));
+    });
+    return;
   }
   if (req.url.startsWith('/history/')) {
-    fs.mkdirSync(process.env.QWEN_COMFY_OUTPUT, { recursive: true });
-    fs.writeFileSync(path.join(process.env.QWEN_COMFY_OUTPUT, 'fixture.png'), png);
+    const spec = process.env.QWEN_FIXTURE_IMAGE ? JSON.parse(process.env.QWEN_FIXTURE_IMAGE) : { filename: 'fixture.png', subfolder: '', type: 'output' };
+    if (!spec.skipWrite) {
+      const base = spec.type && spec.type !== 'output' ? path.resolve(path.dirname(process.env.QWEN_COMFY_OUTPUT), spec.type) : process.env.QWEN_COMFY_OUTPUT;
+      const dir = spec.subfolder ? path.join(base, spec.subfolder) : base;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, spec.filename), spec.bytesB64 ? Buffer.from(spec.bytesB64, 'base64') : png);
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ p1: { fixture: true, status: { completed: true, status_str: 'success' }, outputs: { a: { images: [{ filename: 'fixture.png' }] } } } }));
+    return res.end(JSON.stringify({ p1: { fixture: spec.fixture !== false, status: { completed: true, status_str: 'success', messages: spec.cached ? [['execution_cached']] : [] }, outputs: { a: { images: [{ filename: spec.filename, subfolder: spec.subfolder || '', type: spec.type || 'output' }] } } } }));
   }
   res.writeHead(404); res.end();
 });

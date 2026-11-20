@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
 
 /* __INLINE_DATA_START__ */
 const INLINE = {"stage":"cleanup","kind":"cleanup","expects":"outputs","symbols":["stopComfy","stopLlama"],"example":{"schema":"qwen-duo-12g.config/v1","projectRoot":"","llamaExe":"","model":"","mmproj":"","python":"","comfyMain":"","comfyCwd":"","graph":"","comfyOutput":"","imageDit":"","imageEncoder":"","imageVae":"","thinking":"off","mode":"1080p","llamaPort":8080,"comfyPort":8188,"uiPort":8090,"allowDownloads":false,"allowSystemChanges":false,"expectedBytes":{}},"usage":["qwen-duo-12g stage: cleanup","Run this file alone. It does not read other skill-package files or launch the repository orchestrator.","stdout JSON is a candidate handoff, not a documented Agensi runtime API.","liveHardwareVerified is always false in this script. A controlled fixture is not a real model result.","Do not put secrets in arguments or stdout. This script does not download, install, or edit the system.","Usage: node <this-file> --config <absolute-file> --artifact-dir <absolute-dir> --confirm-write --input-json <small-json>","Exit codes: 0 stage finished, 2 usage, 3 missing input, 4 invalid input, 5 blocked or service failed."]};
@@ -71,7 +70,7 @@ function findSecret(value, where) {
 function summarize(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
-  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'checksMayContinue', 'stopPipeline']) {
+  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'ownerPid', 'ownerStarttime', 'checksMayContinue', 'stopPipeline', 'processAbsent', 'portClosed']) {
     const value = obj[key];
     if (typeof value === 'boolean' || typeof value === 'number') out[key] = value;
     else if (typeof value === 'string' && value.length <= 256 && !SECRET_VALUE.test(value)) out[key] = value;
@@ -207,44 +206,93 @@ function writeNamed(dir, name, data) {
 }
 
 
-function commandText(pid) {
-  if (process.platform !== 'linux') return '';
-  try { return fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8'); } catch { return null; }
-}
-function identityOk(pid, exe) {
-  const text = commandText(pid);
-  if (text == null) return 'dead';
-  if (!text) return 'dead';
-  if (text.includes(exe) || text.includes(path.basename(exe))) return 'match';
-  return 'other';
-}
-async function stopOwned(pid, exe) {
-  const state = identityOk(pid, exe);
-  if (state === 'dead') return { stopped: true, pid, reason: 'already-dead' };
-  if (state === 'other') return { stopped: false, pid, reason: 'identity-mismatch' };
-  if (process.platform === 'win32') {
-    await new Promise((resolve) => {
-      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: false, stdio: 'ignore', windowsHide: true });
-      killer.on('exit', resolve);
-      killer.on('error', resolve);
-    });
-  } else {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+function liveIdentity(pid) {
+  if (process.platform !== 'linux' || !Number.isInteger(pid) || pid <= 0) return { state: 'unavailable' };
+  let exe = '';
+  let starttime = '';
+  let args = [];
+  try { exe = fs.readlinkSync('/proc/' + pid + '/exe'); } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
   }
-  return { stopped: true, pid, reason: 'owned-pid-only' };
+  try {
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const end = stat.lastIndexOf(')');
+    if (end < 0) return { state: 'unavailable' };
+    starttime = stat.slice(end + 2).split(' ')[19] || '';
+    if (!starttime) return { state: 'unavailable' };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  try { args = fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8').split('\0').filter((item) => item !== ''); }
+  catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  return { state: 'alive', exe, starttime, args };
 }
-function startOwned(exe, args, cwd, logPath, extraEnv) {
-  const logFd = fs.openSync(logPath, 'a');
-  const child = spawn(exe, args, {
-    cwd,
-    env: Object.assign({}, process.env, extraEnv),
-    shell: false,
-    stdio: ['ignore', logFd, logFd],
-    windowsHide: true,
-  });
-  return child;
+function sameIdentity(live, expected) {
+  if (!live || live.state !== 'alive' || !expected) return false;
+  if (live.exe !== expected.exe || String(live.starttime) !== String(expected.starttime)) return false;
+  if (typeof expected.token !== 'string' || expected.token.length < 16) return false;
+  for (let i = 0; i < live.args.length - 1; i += 1) {
+    if (live.args[i] === '--qwen-owned-token' && live.args[i + 1] === expected.token) return true;
+  }
+  return false;
+}
+function processAbsent(pid, starttime) {
+  const live = liveIdentity(pid);
+  if (live.state === 'unavailable') return 'unverified';
+  if (live.state === 'absent') return 'absent';
+  if (String(live.starttime) === String(starttime)) return 'alive';
+  return 'replaced';
+}
+
+
+async function stopOwned(expected) {
+  const first = liveIdentity(expected && expected.pid);
+  if (first.state === 'absent') return { stopped: false, signaled: false, reason: 'pid-absent' };
+  if (first.state !== 'alive' || !sameIdentity(first, expected)) return { stopped: false, signaled: false, reason: 'identity-unverified' };
+  const again = liveIdentity(expected.pid);
+  if (!sameIdentity(again, expected)) return { stopped: false, signaled: false, reason: 'identity-changed' };
+  try { process.kill(expected.pid, 'SIGTERM'); }
+  catch (error) {
+    if (error && error.code === 'ESRCH') return { stopped: false, signaled: false, reason: 'pid-absent' };
+    return { stopped: false, signaled: false, reason: 'signal-failed' };
+  }
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    const now = processAbsent(expected.pid, expected.starttime);
+    if (now === 'absent' || now === 'replaced') return { stopped: true, signaled: true, reason: 'process-absent' };
+    if (now === 'unverified') return { stopped: false, signaled: true, reason: 'identity-unverified' };
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const still = liveIdentity(expected.pid);
+  if (!sameIdentity(still, expected)) return { stopped: false, signaled: true, reason: 'identity-changed' };
+  try { process.kill(expected.pid, 'SIGKILL'); } catch { /* already gone */ }
+  const finalState = processAbsent(expected.pid, expected.starttime);
+  if (finalState === 'absent' || finalState === 'replaced') return { stopped: true, signaled: true, reason: 'process-absent' };
+  return { stopped: false, signaled: true, reason: 'still-alive' };
+}
+async function stopChild(child, expected) {
+  const first = liveIdentity(expected && expected.pid);
+  if (first.state === 'absent') return { stopped: true, signaled: false, reason: 'already-absent' };
+  if (first.state !== 'alive' || !sameIdentity(first, expected)) return { stopped: false, signaled: false, reason: 'identity-unverified' };
+  const again = liveIdentity(expected.pid);
+  if (!sameIdentity(again, expected)) return { stopped: false, signaled: false, reason: 'identity-changed' };
+  const exited = new Promise((resolve) => child.once('exit', () => resolve(true)));
+  try { child.kill('SIGTERM'); }
+  catch { return { stopped: false, signaled: false, reason: 'signal-failed' }; }
+  const done = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(false), 400))]);
+  if (!done) {
+    const still = liveIdentity(expected.pid);
+    if (still.state === 'alive' && !sameIdentity(still, expected)) return { stopped: false, signaled: true, reason: 'identity-changed' };
+    try { child.kill('SIGKILL'); } catch { /* gone */ }
+    const done2 = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(false), 400))]);
+    if (!done2) return { stopped: false, signaled: true, reason: 'still-alive' };
+  }
+  return { stopped: true, signaled: true, reason: 'process-exited' };
 }
 
 
@@ -262,20 +310,23 @@ async function main() {
   if (!loaded.ok) return finish(base({ ok: false, exitCode: loaded.exitCode, error: loaded.error }));
   const imagePath = path.join(place.dir, 'service-output.png');
   const imageKept = fs.existsSync(imagePath);
-  const skipped = [];
   const stopped = [];
-  for (const name of fs.readdirSync(place.dir)) {
-    if (!/^owned-.*\.json$/.test(name)) continue;
-    let record; try { record = JSON.parse(fs.readFileSync(path.join(place.dir, name), 'utf8')); } catch { continue; }
-    if (!record || !Number.isInteger(record.pid) || typeof record.exe !== 'string') continue;
-    const state = identityOk(record.pid, record.exe);
-    if (state === 'match') { const result = await stopOwned(record.pid, record.exe); if (result.stopped) stopped.push(record.pid); }
-    else skipped.push({ pid: record.pid, state });
+  const retired = [];
+  const skipped = [];
+  for (const name of ['owned-prompt-model.json', 'owned-image-stage.json']) {
+    const recordPath = path.join(place.dir, name);
+    if (!fs.existsSync(recordPath)) continue;
+    let record; try { record = JSON.parse(fs.readFileSync(recordPath, 'utf8')); } catch { skipped.push(name); continue; }
+    if (!record || !Number.isInteger(record.pid) || typeof record.exe !== 'string' || typeof record.starttime !== 'string' || typeof record.token !== 'string') { skipped.push(name); continue; }
+    const result = await stopOwned(record);
+    if (result.stopped) { stopped.push(record.pid); try { fs.unlinkSync(recordPath); } catch { /* leave it */ } }
+    else if (result.reason === 'pid-absent') { retired.push(record.pid); try { fs.unlinkSync(recordPath); } catch { /* leave it */ } }
+    else skipped.push(name);
   }
   const llamaUp = await portListening(loaded.config.llamaPort);
   const comfyUp = await portListening(loaded.config.comfyPort);
   const ok = input.value.ok === true && imageKept && !llamaUp && !comfyUp && skipped.length === 0;
-  return finish(base({ ok, exitCode: ok ? EXIT.OK : EXIT.BLOCKED, checksMayContinue: false, stopPipeline: true, artifactDir: place.dir, imageKept, stoppedOwnedPids: stopped, skippedUnmatchedPids: skipped.length, portsClear: !llamaUp && !comfyUp, evidenceClass: 'cleanup-check' }));
+  return finish(base({ ok, exitCode: ok ? EXIT.OK : EXIT.BLOCKED, checksMayContinue: false, stopPipeline: true, artifactDir: place.dir, imageKept, stoppedOwnedPids: stopped, retiredAbsentPids: retired, skippedUnmatchedPids: skipped.length, portsClear: !llamaUp && !comfyUp, evidenceClass: 'cleanup-check' }));
 }
 
 main().then((code) => process.exit(code)).catch((error) => {

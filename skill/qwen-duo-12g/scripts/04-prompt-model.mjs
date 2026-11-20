@@ -72,7 +72,7 @@ function findSecret(value, where) {
 function summarize(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
-  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'checksMayContinue', 'stopPipeline']) {
+  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'ownerPid', 'ownerStarttime', 'checksMayContinue', 'stopPipeline', 'processAbsent', 'portClosed']) {
     const value = obj[key];
     if (typeof value === 'boolean' || typeof value === 'number') out[key] = value;
     else if (typeof value === 'string' && value.length <= 256 && !SECRET_VALUE.test(value)) out[key] = value;
@@ -208,44 +208,125 @@ function writeNamed(dir, name, data) {
 }
 
 
-function commandText(pid) {
-  if (process.platform !== 'linux') return '';
-  try { return fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8'); } catch { return null; }
-}
-function identityOk(pid, exe) {
-  const text = commandText(pid);
-  if (text == null) return 'dead';
-  if (!text) return 'dead';
-  if (text.includes(exe) || text.includes(path.basename(exe))) return 'match';
-  return 'other';
-}
-async function stopOwned(pid, exe) {
-  const state = identityOk(pid, exe);
-  if (state === 'dead') return { stopped: true, pid, reason: 'already-dead' };
-  if (state === 'other') return { stopped: false, pid, reason: 'identity-mismatch' };
-  if (process.platform === 'win32') {
-    await new Promise((resolve) => {
-      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: false, stdio: 'ignore', windowsHide: true });
-      killer.on('exit', resolve);
-      killer.on('error', resolve);
-    });
-  } else {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+function liveIdentity(pid) {
+  if (process.platform !== 'linux' || !Number.isInteger(pid) || pid <= 0) return { state: 'unavailable' };
+  let exe = '';
+  let starttime = '';
+  let args = [];
+  try { exe = fs.readlinkSync('/proc/' + pid + '/exe'); } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
   }
-  return { stopped: true, pid, reason: 'owned-pid-only' };
+  try {
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const end = stat.lastIndexOf(')');
+    if (end < 0) return { state: 'unavailable' };
+    starttime = stat.slice(end + 2).split(' ')[19] || '';
+    if (!starttime) return { state: 'unavailable' };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  try { args = fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8').split('\0').filter((item) => item !== ''); }
+  catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  return { state: 'alive', exe, starttime, args };
 }
-function startOwned(exe, args, cwd, logPath, extraEnv) {
-  const logFd = fs.openSync(logPath, 'a');
-  const child = spawn(exe, args, {
-    cwd,
-    env: Object.assign({}, process.env, extraEnv),
-    shell: false,
-    stdio: ['ignore', logFd, logFd],
-    windowsHide: true,
+function sameIdentity(live, expected) {
+  if (!live || live.state !== 'alive' || !expected) return false;
+  if (live.exe !== expected.exe || String(live.starttime) !== String(expected.starttime)) return false;
+  if (typeof expected.token !== 'string' || expected.token.length < 16) return false;
+  for (let i = 0; i < live.args.length - 1; i += 1) {
+    if (live.args[i] === '--qwen-owned-token' && live.args[i + 1] === expected.token) return true;
+  }
+  return false;
+}
+function processAbsent(pid, starttime) {
+  const live = liveIdentity(pid);
+  if (live.state === 'unavailable') return 'unverified';
+  if (live.state === 'absent') return 'absent';
+  if (String(live.starttime) === String(starttime)) return 'alive';
+  return 'replaced';
+}
+
+
+async function stopOwned(expected) {
+  const first = liveIdentity(expected && expected.pid);
+  if (first.state === 'absent') return { stopped: false, signaled: false, reason: 'pid-absent' };
+  if (first.state !== 'alive' || !sameIdentity(first, expected)) return { stopped: false, signaled: false, reason: 'identity-unverified' };
+  const again = liveIdentity(expected.pid);
+  if (!sameIdentity(again, expected)) return { stopped: false, signaled: false, reason: 'identity-changed' };
+  try { process.kill(expected.pid, 'SIGTERM'); }
+  catch (error) {
+    if (error && error.code === 'ESRCH') return { stopped: false, signaled: false, reason: 'pid-absent' };
+    return { stopped: false, signaled: false, reason: 'signal-failed' };
+  }
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    const now = processAbsent(expected.pid, expected.starttime);
+    if (now === 'absent' || now === 'replaced') return { stopped: true, signaled: true, reason: 'process-absent' };
+    if (now === 'unverified') return { stopped: false, signaled: true, reason: 'identity-unverified' };
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const still = liveIdentity(expected.pid);
+  if (!sameIdentity(still, expected)) return { stopped: false, signaled: true, reason: 'identity-changed' };
+  try { process.kill(expected.pid, 'SIGKILL'); } catch { /* already gone */ }
+  const finalState = processAbsent(expected.pid, expected.starttime);
+  if (finalState === 'absent' || finalState === 'replaced') return { stopped: true, signaled: true, reason: 'process-absent' };
+  return { stopped: false, signaled: true, reason: 'still-alive' };
+}
+async function stopChild(child, expected) {
+  const first = liveIdentity(expected && expected.pid);
+  if (first.state === 'absent') return { stopped: true, signaled: false, reason: 'already-absent' };
+  if (first.state !== 'alive' || !sameIdentity(first, expected)) return { stopped: false, signaled: false, reason: 'identity-unverified' };
+  const again = liveIdentity(expected.pid);
+  if (!sameIdentity(again, expected)) return { stopped: false, signaled: false, reason: 'identity-changed' };
+  const exited = new Promise((resolve) => child.once('exit', () => resolve(true)));
+  try { child.kill('SIGTERM'); }
+  catch { return { stopped: false, signaled: false, reason: 'signal-failed' }; }
+  const done = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(false), 400))]);
+  if (!done) {
+    const still = liveIdentity(expected.pid);
+    if (still.state === 'alive' && !sameIdentity(still, expected)) return { stopped: false, signaled: true, reason: 'identity-changed' };
+    try { child.kill('SIGKILL'); } catch { /* gone */ }
+    const done2 = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(false), 400))]);
+    if (!done2) return { stopped: false, signaled: true, reason: 'still-alive' };
+  }
+  return { stopped: true, signaled: true, reason: 'process-exited' };
+}
+
+
+function startOwned(exe, args, cwd, logPath, extraEnv, recordPath) {
+  return new Promise((resolve, reject) => {
+    const token = crypto.randomBytes(16).toString('hex');
+    const fullArgs = args.concat(['--qwen-owned-token', token]);
+    let child;
+    let logFd;
+    try { logFd = fs.openSync(logPath, 'a'); } catch (error) { reject(error); return; }
+    try {
+      child = spawn(exe, fullArgs, {
+        cwd, env: Object.assign({}, process.env, extraEnv), shell: false,
+        stdio: ['ignore', logFd, logFd], windowsHide: true,
+      });
+    } catch (error) { reject(error); return; }
+    let settled = false;
+    const fail = (error) => { if (settled) return; settled = true; reject(error); };
+    child.once('error', fail);
+    child.once('spawn', () => {
+      if (settled) return;
+      child.removeListener('error', fail);
+      child.on('error', () => {});
+      const live = liveIdentity(child.pid);
+      const expected = { pid: child.pid, exe: live.exe, starttime: live.starttime, token, stage: INLINE.stage };
+      if (!sameIdentity(live, expected)) { fail(new Error('process identity was not available')); return; }
+      try { fs.writeFileSync(recordPath, JSON.stringify(expected), { flag: 'wx' }); }
+      catch (error) { fail(error); return; }
+      settled = true;
+      resolve({ child, expected });
+    });
   });
-  return child;
 }
 
 
@@ -273,7 +354,10 @@ async function main() {
   if (await portListening(cfg.llamaPort)) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'llama port is in use; not stopping it', spawned: false }));
   const logWrite = writeNamed(place.dir, 'prompt-service.log', '');
   if (!logWrite.ok) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: logWrite.error, spawned: false }));
-  const child = startOwned(cfg.llamaExe, ['-m', cfg.model, '--mmproj', cfg.mmproj, '-ngl', '44', '-c', '65536', '--host', '127.0.0.1', '--port', String(cfg.llamaPort), ...(cfg.thinking === 'off' ? ['--reasoning', 'off'] : ['--reasoning', 'on', '--reasoning-effort', cfg.thinking])], cfg.projectRoot, logWrite.path, { LLAMA_ARG_MMPROJ_OFFLOAD: '0' });
+  const recordPath = path.join(place.dir, 'owned-prompt-model.json');
+  let owned;
+  try { owned = await startOwned(cfg.llamaExe, ['-m', cfg.model, '--mmproj', cfg.mmproj, '-ngl', '44', '-c', '65536', '--host', '127.0.0.1', '--port', String(cfg.llamaPort), ...(cfg.thinking === 'off' ? ['--reasoning', 'off'] : ['--reasoning', 'on', '--reasoning-effort', cfg.thinking])], cfg.projectRoot, logWrite.path, { LLAMA_ARG_MMPROJ_OFFLOAD: '0' }, recordPath); }
+  catch { return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'service executable could not be started', spawned: false })); }
   let payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'prompt stage failed', spawned: true };
   try {
     if (!(await waitOk(cfg.llamaPort, '/health', limit))) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'prompt service did not become healthy', spawned: true };
@@ -286,13 +370,14 @@ async function main() {
         if (!file.ok) payload = { ok: false, exitCode: EXIT.BLOCKED, error: file.error, spawned: true };
         else {
           const fixture = Boolean(response.body && response.body.fixture === true);
-          payload = { ok: true, exitCode: EXIT.OK, spawned: true, checksMayContinue: true, stopPipeline: false, artifactDir: place.dir, artifactFile: 'prompt.txt', promptSha256: crypto.createHash('sha256').update(content).digest('hex'), promptChars: content.length, serviceDeclaredFixture: fixture, evidenceClass: fixture ? 'controlled-fixture' : 'service-output-unverified-hardware' };
+          payload = { ok: true, exitCode: EXIT.OK, spawned: true, checksMayContinue: true, stopPipeline: false, artifactDir: place.dir, artifactFile: 'prompt.txt', promptSha256: crypto.createHash('sha256').update(content).digest('hex'), promptChars: content.length, ownerPid: owned.expected.pid, ownerStarttime: owned.expected.starttime, serviceDeclaredFixture: fixture, evidenceClass: fixture ? 'controlled-fixture' : 'service-output-unverified-hardware' };
         }
       }
     }
   } catch { payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'prompt service call failed', spawned: true }; }
-  const released = await stopOwned(child.pid, cfg.llamaExe);
-  if (payload.ok && !released.stopped) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'owned prompt process was not released', spawned: true };
+  const released = await stopChild(owned.child, owned.expected);
+  if (released.stopped) { try { fs.unlinkSync(recordPath); } catch { /* record remains for cleanup */ } }
+  if (payload.ok && !released.stopped) payload = { ok: false, exitCode: EXIT.BLOCKED, error: 'owned prompt process was not released', spawned: true, ownedProcessReleased: false };
   if (payload.ok) payload.ownedProcessReleased = true;
   return finish(base(payload));
 }

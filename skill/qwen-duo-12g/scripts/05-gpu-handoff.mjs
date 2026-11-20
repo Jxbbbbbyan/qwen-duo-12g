@@ -71,7 +71,7 @@ function findSecret(value, where) {
 function summarize(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
-  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'checksMayContinue', 'stopPipeline']) {
+  for (const key of ['stage', 'ok', 'exitCode', 'dependencyOk', 'artifactVerified', 'artifactDir', 'portsClear', 'promptSha256', 'imageSha256', 'serviceDeclaredFixture', 'ownedProcessReleased', 'ownerPid', 'ownerStarttime', 'checksMayContinue', 'stopPipeline', 'processAbsent', 'portClosed']) {
     const value = obj[key];
     if (typeof value === 'boolean' || typeof value === 'number') out[key] = value;
     else if (typeof value === 'string' && value.length <= 256 && !SECRET_VALUE.test(value)) out[key] = value;
@@ -207,6 +207,50 @@ function writeNamed(dir, name, data) {
 }
 
 
+function liveIdentity(pid) {
+  if (process.platform !== 'linux' || !Number.isInteger(pid) || pid <= 0) return { state: 'unavailable' };
+  let exe = '';
+  let starttime = '';
+  let args = [];
+  try { exe = fs.readlinkSync('/proc/' + pid + '/exe'); } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  try {
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const end = stat.lastIndexOf(')');
+    if (end < 0) return { state: 'unavailable' };
+    starttime = stat.slice(end + 2).split(' ')[19] || '';
+    if (!starttime) return { state: 'unavailable' };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  try { args = fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8').split('\0').filter((item) => item !== ''); }
+  catch (error) {
+    if (error && error.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unavailable' };
+  }
+  return { state: 'alive', exe, starttime, args };
+}
+function sameIdentity(live, expected) {
+  if (!live || live.state !== 'alive' || !expected) return false;
+  if (live.exe !== expected.exe || String(live.starttime) !== String(expected.starttime)) return false;
+  if (typeof expected.token !== 'string' || expected.token.length < 16) return false;
+  for (let i = 0; i < live.args.length - 1; i += 1) {
+    if (live.args[i] === '--qwen-owned-token' && live.args[i + 1] === expected.token) return true;
+  }
+  return false;
+}
+function processAbsent(pid, starttime) {
+  const live = liveIdentity(pid);
+  if (live.state === 'unavailable') return 'unverified';
+  if (live.state === 'absent') return 'absent';
+  if (String(live.starttime) === String(starttime)) return 'alive';
+  return 'replaced';
+}
+
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.error) return finish(base({ ok: false, exitCode: EXIT.USAGE, error: args.error }));
@@ -216,16 +260,18 @@ async function main() {
   if (!input.value) return finish(base({ ok: false, exitCode: EXIT.MISSING, error: 'pass --input-json' }));
   const place = artifactDir(args.options['artifact-dir'], args.flags.confirmWrite);
   if (!place.ok) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: place.error }));
-  if (input.value.stage !== 'prompt-model' || input.value.ok !== true || input.value.artifactDir !== place.dir) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt stage did not authorize this directory', protocolMismatch: input.value.stage !== 'prompt-model' }));
+  if (input.value.stage !== 'prompt-model' || input.value.ok !== true || input.value.artifactDir !== place.dir || input.value.ownedProcessReleased !== true) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt stage did not release its process', protocolMismatch: input.value.stage !== 'prompt-model', ownedProcessReleased: false }));
   const loaded = loadConfig(args.options.config);
   if (!loaded.ok) return finish(base({ ok: false, exitCode: loaded.exitCode, error: loaded.error }));
-  if (await portListening(loaded.config.llamaPort)) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'llama port is still accepting connections; this script will not stop it' }));
+  if (await portListening(loaded.config.llamaPort)) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'llama port is still accepting connections; this script will not stop it', portClosed: false, ownedProcessReleased: false }));
+  const release = processAbsent(input.value.ownerPid, input.value.ownerStarttime);
+  if (release !== 'absent' && release !== 'replaced') return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'owned prompt process is not confirmed absent', processAbsent: false, portClosed: true, ownedProcessReleased: false }));
   const promptPath = path.join(place.dir, 'prompt.txt');
   let text = ''; try { text = fs.readFileSync(promptPath, 'utf8'); } catch { return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt artifact missing' })); }
   if (!inside(place.dir, promptPath)) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt artifact is outside the directory' }));
   const digest = crypto.createHash('sha256').update(text).digest('hex');
   if (digest !== input.value.promptSha256) return finish(base({ ok: false, exitCode: EXIT.BLOCKED, error: 'prompt artifact hash mismatch' }));
-  return finish(base({ ok: true, exitCode: EXIT.OK, checksMayContinue: true, stopPipeline: false, artifactDir: place.dir, promptSha256: digest, ownedProcessReleased: true, serviceDeclaredFixture: input.value.serviceDeclaredFixture === true, evidenceClass: 'port-release-check' }));
+  return finish(base({ ok: true, exitCode: EXIT.OK, checksMayContinue: true, stopPipeline: false, artifactDir: place.dir, promptSha256: digest, ownerPid: input.value.ownerPid, ownerStarttime: input.value.ownerStarttime, processAbsent: true, portClosed: true, ownedProcessReleased: true, releaseEvidence: 'process-absent-and-port-closed', serviceDeclaredFixture: input.value.serviceDeclaredFixture === true, evidenceClass: 'process-release-check' }));
 }
 
 main().then((code) => process.exit(code)).catch((error) => {

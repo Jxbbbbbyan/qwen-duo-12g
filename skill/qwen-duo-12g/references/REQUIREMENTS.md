@@ -8,7 +8,7 @@ Dates are America/Los_Angeles. The attached checklist was created 2026-11-19 15:
 | Frontmatter | https://www.agensi.io/docs/packaging and the 2026-04-27 security article | Confirmed | `name` and `description`, plus summary, version, tags, keywords, use_cases. `docs_url` is omitted. |
 | ZIP layout conflict | packaging vs security article | Both cited | One top-level folder `qwen-duo-12g/` with `SKILL.md` at its root. One skill, not a pack. |
 | Script runtime | packaging; how-agents-load-skills | Confirmed | Eight self-contained scripts. SKILL.md orders them. No script reads a sibling. |
-| 20KB logic guideline | packaging | Guideline, not a hard cap | Measured per script, inline JSON excluded. |
+| 20KB logic guideline | packaging | Guideline, not a hard cap | Most scripts stay under 20KB. The prompt and image scripts are larger because process identity and image-path checks stay in the same file as the service they start. |
 | Windows GPU and services | packaging, submit, sell; 15:31 addendum | Unknown | Pipeline blocked. Local orchestrator is separate and not launched. |
 | Downloads and system changes | packaging; security article; review page | Confirmed as scan concerns | Scripts refuse `allowDownloads` and `allowSystemChanges`. They do not install or download. |
 | ZIP limits | packaging; submit | Confirmed | Text only, no weights, no binaries, no `node_modules`. |

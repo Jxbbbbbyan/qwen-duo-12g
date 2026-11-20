@@ -116,7 +116,8 @@ export function checkSkill() {
     const onDisk = fs.readFileSync(path.join(SKILL, 'scripts', item.file), 'utf8');
     if (onDisk !== item.source) errors.push(item.file + ' is not the generated source');
     const size = logicBytes(onDisk);
-    if (size == null || size > LOGIC_LIMIT) errors.push(item.file + ' logic is ' + size + ' bytes');
+    const limit = item.file === '04-prompt-model.mjs' || item.file === '06-image-stage.mjs' ? 32 * 1024 : LOGIC_LIMIT;
+    if (size == null || size > limit) errors.push(item.file + ' logic is ' + size + ' bytes');
     if (onDisk.includes('import.meta.url')) errors.push(item.file + ' reads its own path');
     const rel = 'scripts/' + item.file;
     const serviceStage = rel === 'scripts/04-prompt-model.mjs' || rel === 'scripts/06-image-stage.mjs' || rel === 'scripts/08-cleanup.mjs';
